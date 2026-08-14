@@ -38,6 +38,8 @@ target_link_libraries(imgui PUBLIC SDL3::SDL3)
 
 add_executable(wobble
     src/main.cpp
+    src/bus.cpp
+    src/cpu.cpp
 )
 target_link_libraries(wobble PRIVATE imgui SDL3::SDL3)
 target_compile_options(wobble PRIVATE -Wall -Wextra)

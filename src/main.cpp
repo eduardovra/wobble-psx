@@ -3,8 +3,73 @@
 #include <imgui_impl_sdl3.h>
 #include <imgui_impl_sdlrenderer3.h>
 
-int main(int, char**)
+#include "bus.h"
+#include "cpu.h"
+
+namespace {
+
+constexpr const char* REG_NAMES[32] = {
+    "zero", "at", "v0", "v1", "a0", "a1", "a2", "a3",
+    "t0",   "t1", "t2", "t3", "t4", "t5", "t6", "t7",
+    "s0",   "s1", "s2", "s3", "s4", "s5", "s6", "s7",
+    "t8",   "t9", "k0", "k1", "gp", "sp", "fp", "ra",
+};
+
+// Not cycle-accurate pacing — just a budget per video frame that
+// keeps the UI responsive while the BIOS executes.
+constexpr int INSTRUCTIONS_PER_FRAME = 100000;
+
+void draw_cpu_window(Cpu& cpu, bool& emu_running)
 {
+    ImGui::Begin("CPU");
+
+    if (cpu.halted) {
+        emu_running = false;
+        ImGui::TextColored(ImVec4(1.0f, 0.3f, 0.3f, 1.0f),
+                           "HALTED: %s",
+                           cpu.halt_reason.c_str());
+    } else {
+        ImGui::TextUnformatted(emu_running ? "running" : "paused");
+    }
+
+    if (ImGui::Button(emu_running ? "Pause" : "Run")) {
+        emu_running = !emu_running;
+    }
+    ImGui::SameLine();
+    if (ImGui::Button("Step")) {
+        emu_running = false;
+        cpu.step();
+    }
+    ImGui::SameLine();
+    if (ImGui::Button("Reset")) {
+        cpu.reset();
+    }
+
+    ImGui::Text("pc %08X  hi %08X  lo %08X", cpu.pc, cpu.hi, cpu.lo);
+    ImGui::Separator();
+    for (int i = 0; i < 32; i++) {
+        if (i % 4 != 0) {
+            ImGui::SameLine();
+        }
+        ImGui::Text("%-4s %08X ", REG_NAMES[i], cpu.regs[i]);
+    }
+
+    ImGui::End();
+}
+
+}  // namespace
+
+int main(int argc, char** argv)
+{
+    const char* bios_path = (argc > 1) ? argv[1] : "SCPH1001.BIN";
+
+    static Bus bus;
+    if (!bus.load_bios(bios_path)) {
+        SDL_Log("failed to load BIOS from %s", bios_path);
+        return 1;
+    }
+    Cpu cpu(bus);
+
     if (!SDL_Init(SDL_INIT_VIDEO | SDL_INIT_GAMEPAD)) {
         SDL_Log("SDL_Init failed: %s", SDL_GetError());
         return 1;
@@ -33,6 +98,8 @@ int main(int, char**)
     ImGui_ImplSDL3_InitForSDLRenderer(window, renderer);
     ImGui_ImplSDLRenderer3_Init(renderer);
 
+    bool emu_running = true;
+    bool was_halted = false;
     bool running = true;
     while (running) {
         SDL_Event event;
@@ -43,14 +110,24 @@ int main(int, char**)
             }
         }
 
+        if (emu_running) {
+            for (int i = 0; i < INSTRUCTIONS_PER_FRAME; i++) {
+                cpu.step();
+                if (cpu.halted) {
+                    break;
+                }
+            }
+        }
+        if (cpu.halted && !was_halted) {
+            SDL_Log("cpu halted: %s", cpu.halt_reason.c_str());
+        }
+        was_halted = cpu.halted;
+
         ImGui_ImplSDLRenderer3_NewFrame();
         ImGui_ImplSDL3_NewFrame();
         ImGui::NewFrame();
 
-        ImGui::Begin("wobble");
-        ImGui::Text("PS1 emulator scaffold");
-        ImGui::Text("%.1f FPS", ImGui::GetIO().Framerate);
-        ImGui::End();
+        draw_cpu_window(cpu, emu_running);
 
         ImGui::Render();
         SDL_SetRenderDrawColor(renderer, 30, 30, 30, 255);
