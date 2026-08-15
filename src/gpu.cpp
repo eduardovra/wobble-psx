@@ -88,9 +88,29 @@ void Gpu::reset()
     dma_direction = DmaDirection::Off;
     display_disabled = true;
     irq = false;
+    scanline = 0;
     odd_field = false;
     gpuread_latch = 0;
     // VRAM survives a reset on hardware, so it is not cleared here.
+}
+
+bool Gpu::next_scanline()
+{
+    scanline++;
+
+    if (scanline == VISIBLE_SCANLINES) {
+        return true;
+    }
+    if (scanline >= SCANLINES_PER_FRAME) {
+        scanline = 0;
+        // An interlaced display shows alternate halves of the picture
+        // on alternate frames; a progressive one has only the one
+        // field and nothing to alternate.
+        if (interlaced()) {
+            odd_field = !odd_field;
+        }
+    }
+    return false;
 }
 
 u32 Gpu::status() const
@@ -102,10 +122,10 @@ u32 Gpu::status() const
     value |= draw_mode & 0x7FF;
     value |= (mask_setting & 0x3) << 11;
 
-    // Bits 13 and 31 both describe the interlace field. A progressive
-    // display has no fields, so 13 reads as one and 31 as zero.
-    const bool interlaced = ((display_mode >> 5) & 1) != 0;
-    const bool field = interlaced ? odd_field : true;
+    // Bit 13 is the field being shown. A progressive display has none,
+    // and reads as one.
+    const bool interlace = interlaced();
+    const bool field = interlace ? odd_field : true;
     value |= static_cast<u32>(field) << 13;
 
     value |= ((display_mode >> 7) & 1) << 14;  // reverse flag
@@ -148,7 +168,17 @@ u32 Gpu::status() const
     }
     value |= static_cast<u32>(dma_request) << 25;
     value |= static_cast<u32>(dma_direction) << 29;
-    value |= static_cast<u32>(interlaced && odd_field) << 31;
+
+    // Bit 31 is which lines are being drawn at this instant: none
+    // during vertical blank, then the current field when interlaced,
+    // and otherwise simply whether the current scanline is odd. It is
+    // the finest-grained thing software can see of the video signal,
+    // and it is what a display-synchronised loop watches.
+    bool drawing_odd = false;
+    if (!in_vblank()) {
+        drawing_odd = interlace ? odd_field : ((scanline & 1) != 0);
+    }
+    value |= static_cast<u32>(drawing_odd) << 31;
 
     return value;
 }

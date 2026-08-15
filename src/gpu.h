@@ -38,14 +38,33 @@ struct Gpu {
     static constexpr std::size_t VRAM_PIXELS =
         std::size_t{VRAM_WIDTH} * VRAM_HEIGHT;
 
+    // NTSC video timing. The GPU's clock is 11/7 of the CPU's —
+    // 53.2224 MHz against 33.8688 — and a scanline is 3413 of its
+    // cycles, which is 2171.9 of the CPU's. Rounding that to a whole
+    // cycle runs the display 0.004% fast, far below anything software
+    // can notice, and keeps the scanline period an exact integer so
+    // the scheduler has nothing to accumulate error in.
+    //
+    // 263 lines at that rate is 59.29 frames a second. That really is
+    // the console's refresh rate: it is derived from the same crystal
+    // as everything else rather than from the broadcast standard, and
+    // comes out a little under NTSC's nominal 59.94.
+    static constexpr u64 CYCLES_PER_SCANLINE = 2172;
+    static constexpr u32 SCANLINES_PER_FRAME = 263;
+    static constexpr u32 VISIBLE_SCANLINES = 240;
+
     void reset();
 
-    // Called once per vertical blank. An interlaced display draws
-    // alternate scanlines on alternate fields, and GPUSTAT reports
-    // which one is current — software waits on that bit to pace itself
-    // to the video signal, so it has to come from the clock rather
-    // than sitting still.
-    void next_field() { odd_field = !odd_field; }
+    // Advances the video signal by one scanline, and reports whether
+    // vertical blanking has just begun — the moment everything else in
+    // the machine is paced by.
+    bool next_scanline();
+
+    // Vertical blank is nothing more than the signal having passed the
+    // last visible line.
+    bool in_vblank() const { return scanline >= VISIBLE_SCANLINES; }
+
+    bool interlaced() const { return ((display_mode >> 5) & 1) != 0; }
 
     u32 status() const;
 
@@ -109,8 +128,13 @@ struct Gpu {
     DmaDirection dma_direction = DmaDirection::Off;
     bool display_disabled = true;  // the GPU powers up blanked
     bool irq = false;              // GP0(1Fh) sets it, GP1(02h) clears
-    bool odd_field = false;        // which field an interlaced display
-                                   // is on, flipped by next_field()
+
+    // Where the video signal has got to, and which field it is on when
+    // the display is interlaced. Software reads both back out of
+    // GPUSTAT to pace itself against the display, so they have to come
+    // from the clock rather than sitting still.
+    u32 scanline = 0;
+    bool odd_field = false;
 
     // What GPUREAD answers with when no transfer is running: GP1(10h)
     // loads it with one of the drawing registers.

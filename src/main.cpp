@@ -32,11 +32,6 @@ constexpr const char* REG_NAMES[32] = {
 // keeps the emulator at roughly real speed.
 constexpr u64 CYCLES_PER_HOST_FRAME = CPU_CLOCK_HZ / 60;
 
-// One VBlank per NTSC field. A placeholder until there is a GPU: the
-// true rate is 59.94 Hz and comes from the video clock and scanline
-// count, not from dividing the CPU clock.
-constexpr u64 VBLANK_INTERVAL = CPU_CLOCK_HZ / 60;
-
 // Machine state that is neither CPU nor memory — for now just the
 // frames VBlank has counted, which is the only visible sign that the
 // scheduler is keeping time.
@@ -52,25 +47,29 @@ void reset_machine(Cpu& cpu, Scheduler& scheduler, Timing& timing)
     cpu.bus.dma.reset();
     scheduler.reset();
     timing = Timing{};
-    scheduler.schedule_in(EventKind::VBlank, VBLANK_INTERVAL);
+    scheduler.schedule_in(EventKind::Hblank, Gpu::CYCLES_PER_SCANLINE);
 }
 
 void dispatch_due_events(Bus& bus, Scheduler& scheduler, Timing& timing)
 {
     while (const std::optional<DueEvent> event = scheduler.next_due()) {
         switch (event->kind) {
-        case EventKind::VBlank:
-            timing.frames++;
-            // The only path from a scheduled event to the CPU: the
-            // device raises its line, the controller decides whether
-            // it is unmasked, and the CPU notices on its next step.
-            bus.irq.raise(Interrupt::VBlank);
-            bus.gpu.next_field();
+        case EventKind::Hblank:
+            // Vertical blank falls out of the video signal rather than
+            // being scheduled: the GPU says when the scanline it just
+            // finished was the last visible one. That is the only path
+            // from a scheduled event to the CPU — the device raises
+            // its line, the controller decides whether it is unmasked,
+            // and the CPU notices on its next step.
+            if (bus.gpu.next_scanline()) {
+                timing.frames++;
+                bus.irq.raise(Interrupt::VBlank);
+            }
             // Nothing is periodic on its own; a repeating event asks
             // for its next occurrence as it fires. Counting from the
             // deadline rather than from now keeps it exactly on rate.
-            scheduler.schedule_at(EventKind::VBlank,
-                                  event->deadline + VBLANK_INTERVAL);
+            scheduler.schedule_at(EventKind::Hblank,
+                                  event->deadline + Gpu::CYCLES_PER_SCANLINE);
             break;
         case EventKind::Count:
             break;  // sentinel, never returned
@@ -135,8 +134,10 @@ void draw_cpu_window(Cpu& cpu,
                 cpu.cause_register(),
                 cpu.epc,
                 cpu.bad_vaddr);
-    ImGui::Text(
-        "i_stat %04X  i_mask %04X", cpu.bus.irq.status, cpu.bus.irq.mask);
+    ImGui::Text("i_stat %04X  i_mask %04X  scanline %u",
+                cpu.bus.irq.status,
+                cpu.bus.irq.mask,
+                cpu.bus.gpu.scanline);
     ImGui::Separator();
     for (int i = 0; i < 32; i++) {
         if (i % 4 != 0) {

@@ -116,37 +116,99 @@ TEST_CASE("the display mode word is unpacked into GPUSTAT")
     CHECK((gpu.status() & (1u << 20)) == 0);  // and no longer PAL
 }
 
-TEST_CASE("the interlace field alternates once a field has passed")
+namespace {
+
+// Runs the video signal on by whole scanlines, reporting how many of
+// them began a vertical blank.
+u32 advance_scanlines(Gpu& gpu, u32 count)
+{
+    u32 vblanks = 0;
+    for (u32 i = 0; i < count; i++) {
+        if (gpu.next_scanline()) {
+            vblanks++;
+        }
+    }
+    return vblanks;
+}
+
+}  // namespace
+
+TEST_CASE("vertical blank begins once the last visible line is done")
+{
+    Gpu gpu;
+
+    CHECK_FALSE(gpu.in_vblank());
+    CHECK(advance_scanlines(gpu, Gpu::VISIBLE_SCANLINES) == 1);
+    CHECK(gpu.in_vblank());
+
+    // It lasts the rest of the frame, and the next one comes a whole
+    // frame later rather than at the end of the blanking interval.
+    CHECK(advance_scanlines(gpu, Gpu::SCANLINES_PER_FRAME - 1) == 0);
+    CHECK_FALSE(gpu.in_vblank());
+    CHECK(advance_scanlines(gpu, Gpu::SCANLINES_PER_FRAME) == 1);
+}
+
+TEST_CASE("a frame's worth of scanlines is one frame of emulated time")
+{
+    // The whole machine is paced off this, so the arithmetic is worth
+    // pinning: 263 lines of 2172 cycles is 59.3 frames a second.
+    constexpr u64 CYCLES_PER_FRAME =
+        Gpu::CYCLES_PER_SCANLINE * Gpu::SCANLINES_PER_FRAME;
+    constexpr u64 CPU_CLOCK = 33'868'800;
+
+    CHECK(CYCLES_PER_FRAME == 571'236);
+    CHECK(CPU_CLOCK / CYCLES_PER_FRAME == 59);
+}
+
+TEST_CASE("GPUSTAT's drawing bit follows the video signal")
 {
     Gpu gpu;
     constexpr u32 FIELD = 1u << 13;
     constexpr u32 DRAWING_ODD = 1u << 31;
 
-    SUBCASE("a progressive display has no field to report")
+    SUBCASE("a progressive display alternates it every scanline")
     {
         gpu.write_gp1(0x08000000);  // interlace off
-        CHECK((gpu.status() & FIELD) != 0);
-        CHECK((gpu.status() & DRAWING_ODD) == 0);
 
-        gpu.next_field();
-        CHECK((gpu.status() & FIELD) != 0);  // and it does not move
+        // With no fields to speak of, bit 13 sits at one.
+        CHECK((gpu.status() & FIELD) != 0);
+
+        CHECK((gpu.status() & DRAWING_ODD) == 0);
+        gpu.next_scanline();
+        CHECK((gpu.status() & DRAWING_ODD) != 0);
+        gpu.next_scanline();
         CHECK((gpu.status() & DRAWING_ODD) == 0);
     }
 
-    SUBCASE("an interlaced one alternates every vertical blank")
+    SUBCASE("an interlaced one alternates it every frame instead")
     {
         gpu.write_gp1((0x08u << 24) | (1u << 5));
+
         CHECK((gpu.status() & FIELD) == 0);
         CHECK((gpu.status() & DRAWING_ODD) == 0);
 
-        // Software paces itself by watching this change, so a bit that
-        // never moves leaves it waiting forever.
-        gpu.next_field();
+        // A single scanline changes nothing: the field is what moves.
+        gpu.next_scanline();
+        CHECK((gpu.status() & DRAWING_ODD) == 0);
+
+        advance_scanlines(gpu, Gpu::SCANLINES_PER_FRAME);
         CHECK((gpu.status() & FIELD) != 0);
         CHECK((gpu.status() & DRAWING_ODD) != 0);
 
-        gpu.next_field();
+        advance_scanlines(gpu, Gpu::SCANLINES_PER_FRAME);
         CHECK((gpu.status() & FIELD) == 0);
+    }
+
+    SUBCASE("nothing is being drawn during vertical blank")
+    {
+        gpu.write_gp1(0x08000000);
+        advance_scanlines(gpu, Gpu::VISIBLE_SCANLINES + 1);
+
+        REQUIRE(gpu.in_vblank());
+        // On a line whose number is odd, which anywhere else in the
+        // frame would show up in the bit.
+        REQUIRE((gpu.scanline & 1) != 0);
+        CHECK((gpu.status() & DRAWING_ODD) == 0);
     }
 }
 

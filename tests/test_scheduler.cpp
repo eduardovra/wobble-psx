@@ -13,7 +13,7 @@ TEST_CASE("an idle scheduler has nothing to report")
 TEST_CASE("an event fires on its deadline, not before")
 {
     Scheduler scheduler;
-    scheduler.schedule_in(EventKind::VBlank, 100);
+    scheduler.schedule_in(EventKind::Hblank, 100);
     CHECK(scheduler.next_deadline() == 100);
 
     scheduler.advance(99);
@@ -22,14 +22,14 @@ TEST_CASE("an event fires on its deadline, not before")
     scheduler.advance(1);
     const std::optional<DueEvent> event = scheduler.next_due();
     REQUIRE(event.has_value());
-    CHECK(event->kind == EventKind::VBlank);
+    CHECK(event->kind == EventKind::Hblank);
     CHECK(event->deadline == 100);
 }
 
 TEST_CASE("a fired event is not delivered twice")
 {
     Scheduler scheduler;
-    scheduler.schedule_in(EventKind::VBlank, 10);
+    scheduler.schedule_in(EventKind::Hblank, 10);
     scheduler.advance(10);
 
     REQUIRE(scheduler.next_due().has_value());
@@ -40,8 +40,8 @@ TEST_CASE("a fired event is not delivered twice")
 TEST_CASE("a cancelled event never fires")
 {
     Scheduler scheduler;
-    scheduler.schedule_in(EventKind::VBlank, 10);
-    scheduler.cancel(EventKind::VBlank);
+    scheduler.schedule_in(EventKind::Hblank, 10);
+    scheduler.cancel(EventKind::Hblank);
     scheduler.advance(100);
 
     CHECK(scheduler.next_deadline() == Scheduler::NEVER);
@@ -57,7 +57,7 @@ TEST_CASE("rescheduling can only be done from the deadline")
     constexpr u64 RUN = 10'000;
 
     Scheduler scheduler;
-    scheduler.schedule_in(EventKind::VBlank, PERIOD);
+    scheduler.schedule_in(EventKind::Hblank, PERIOD);
 
     u64 fired = 0;
     while (scheduler.now < RUN) {
@@ -73,7 +73,7 @@ TEST_CASE("rescheduling can only be done from the deadline")
     // The same run counting from `now` instead folds each overshoot
     // into the period, so the event slips progressively late.
     Scheduler drifting;
-    drifting.schedule_in(EventKind::VBlank, PERIOD);
+    drifting.schedule_in(EventKind::Hblank, PERIOD);
     u64 drifted = 0;
     while (drifting.now < RUN) {
         drifting.advance(CHUNK);
@@ -88,7 +88,7 @@ TEST_CASE("rescheduling can only be done from the deadline")
 TEST_CASE("reset clears the clock and every pending event")
 {
     Scheduler scheduler;
-    scheduler.schedule_in(EventKind::VBlank, 10);
+    scheduler.schedule_in(EventKind::Hblank, 10);
     scheduler.advance(5);
     scheduler.reset();
 

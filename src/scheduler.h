@@ -13,9 +13,12 @@ constexpr u64 CPU_CLOCK_HZ = 33'868'800;
 
 // Devices that can ask to be woken at a future time. Each kind holds
 // at most one pending event, which is all the hardware needs: a timer
-// has one next overflow, the GPU one next VBlank.
+// has one next overflow, the video signal one next scanline.
 enum class EventKind : u32 {
-    VBlank,
+    // The end of a scanline, which is the machine's finest video
+    // heartbeat. Vertical blank is not scheduled separately: it is
+    // whichever scanline the GPU says begins it.
+    Hblank,
 
     Count,  // sentinel: number of kinds, never a real event
 };
