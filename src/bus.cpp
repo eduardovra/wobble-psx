@@ -72,6 +72,34 @@ void write_to(std::array<u8, N>& mem, u32 offset, T value)
 
 }  // namespace
 
+bool Bus::read_io(u32 phys, u32& value) const
+{
+    switch (phys) {
+    case Irq::STATUS:
+        value = irq.status;
+        return true;
+    case Irq::MASK:
+        value = irq.mask;
+        return true;
+    default:
+        return false;
+    }
+}
+
+bool Bus::write_io(u32 phys, u32 value)
+{
+    switch (phys) {
+    case Irq::STATUS:
+        irq.acknowledge(static_cast<u16>(value));
+        return true;
+    case Irq::MASK:
+        irq.mask = static_cast<u16>(value);
+        return true;
+    default:
+        return false;
+    }
+}
+
 bool Bus::note_unhandled(u32 addr) const
 {
     return reported_addresses.insert(addr).second;
@@ -98,7 +126,9 @@ u32 Bus::read32(u32 addr) const
         return read_from<u32>(bios, phys - BIOS_START);
     }
     if (phys >= IO_START && phys < IO_END) {
-        return 0;  // I/O not implemented yet
+        u32 value = 0;
+        read_io(phys, value);  // 0 for a device that does not exist yet
+        return value;
     }
     if (note_unhandled(addr)) {
         log_message(std::format("bus: unhandled read32 at {:08X}", addr));
@@ -116,7 +146,9 @@ u16 Bus::read16(u32 addr) const
         return read_from<u16>(bios, phys - BIOS_START);
     }
     if (phys >= IO_START && phys < IO_END) {
-        return 0;
+        u32 value = 0;
+        read_io(phys, value);
+        return static_cast<u16>(value);
     }
     if (note_unhandled(addr)) {
         log_message(std::format("bus: unhandled read16 at {:08X}", addr));
@@ -134,7 +166,9 @@ u8 Bus::read8(u32 addr) const
         return bios[phys - BIOS_START];
     }
     if (phys >= IO_START && phys < IO_END) {
-        return 0;
+        u32 value = 0;
+        read_io(phys, value);
+        return static_cast<u8>(value);
     }
     if (in_expansion1(phys)) {
         return 0xFF;  // no expansion device present
@@ -153,7 +187,8 @@ void Bus::write32(u32 addr, u32 value)
         return;
     }
     if (phys >= IO_START && phys < IO_END) {
-        return;  // I/O not implemented yet
+        write_io(phys, value);  // dropped if no device claims it yet
+        return;
     }
     if (addr == CACHE_CONTROL) {
         return;
@@ -172,6 +207,7 @@ void Bus::write16(u32 addr, u16 value)
         return;
     }
     if (phys >= IO_START && phys < IO_END) {
+        write_io(phys, value);
         return;
     }
     if (note_unhandled(addr)) {
@@ -188,6 +224,7 @@ void Bus::write8(u32 addr, u8 value)
         return;
     }
     if (phys >= IO_START && phys < IO_END) {
+        write_io(phys, value);
         return;
     }
     if (note_unhandled(addr)) {

@@ -4,6 +4,7 @@
 #include <string>
 #include <unordered_set>
 
+#include "irq.h"
 #include "types.h"
 
 // Everything the CPU can address. There is no MMU on the R3000A: an
@@ -16,8 +17,9 @@
 //   0x1F801000  8 KB   hardware registers — GPU, SPU, DMA, timers…
 //   0x1FC00000  512 KB BIOS ROM
 //
-// So far only RAM and the BIOS are real; the register range reads as
-// zero and swallows writes, which is enough to get the BIOS booting.
+// So far only RAM, the BIOS and the interrupt controller are real; the
+// rest of the register range reads as zero and swallows writes, which
+// is enough to get the BIOS booting.
 struct Bus {
     static constexpr u32 RAM_SIZE = 2 * 1024 * 1024;
     static constexpr u32 BIOS_SIZE = 512 * 1024;
@@ -33,6 +35,17 @@ struct Bus {
     void write16(u32 addr, u16 value);
     void write32(u32 addr, u32 value);
 
+    // Decode of the hardware register range, shared by all three
+    // access widths. Returns whether a device claimed the address,
+    // leaving `value` untouched when none did.
+    //
+    // Only the exact register address matches, so a narrow access to
+    // the middle of a register falls through to the unimplemented
+    // default instead of returning a shifted value. Nothing does that
+    // to the registers implemented so far.
+    bool read_io(u32 phys, u32& value) const;
+    bool write_io(u32 phys, u32 value);
+
     // Records an address that no device claimed, and reports whether
     // it had not been seen before. An unimplemented register is
     // usually polled in a loop, so logging every access buries the
@@ -46,6 +59,8 @@ struct Bus {
 
     std::array<u8, RAM_SIZE> ram{};
     std::array<u8, BIOS_SIZE> bios{};
+
+    Irq irq;
 
     // Mutable because the read paths are const: noting an address is
     // bookkeeping about the emulator, not a change to the machine.

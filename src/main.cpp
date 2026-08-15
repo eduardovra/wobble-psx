@@ -47,17 +47,22 @@ struct Timing {
 void reset_machine(Cpu& cpu, Scheduler& scheduler, Timing& timing)
 {
     cpu.reset();
+    cpu.bus.irq.reset();
     scheduler.reset();
     timing = Timing{};
     scheduler.schedule_in(EventKind::VBlank, VBLANK_INTERVAL);
 }
 
-void dispatch_due_events(Scheduler& scheduler, Timing& timing)
+void dispatch_due_events(Bus& bus, Scheduler& scheduler, Timing& timing)
 {
     while (const std::optional<DueEvent> event = scheduler.next_due()) {
         switch (event->kind) {
         case EventKind::VBlank:
             timing.frames++;
+            // The only path from a scheduled event to the CPU: the
+            // device raises its line, the controller decides whether
+            // it is unmasked, and the CPU notices on its next step.
+            bus.irq.raise(Interrupt::VBlank);
             // Nothing is periodic on its own; a repeating event asks
             // for its next occurrence as it fires. Counting from the
             // deadline rather than from now keeps it exactly on rate.
@@ -81,7 +86,7 @@ void run_cycles(Cpu& cpu, Scheduler& scheduler, Timing& timing, u64 budget)
         while (scheduler.now < deadline && !cpu.halted) {
             scheduler.advance(cpu.step());
         }
-        dispatch_due_events(scheduler, timing);
+        dispatch_due_events(cpu.bus, scheduler, timing);
     }
 }
 
@@ -111,7 +116,7 @@ void draw_cpu_window(Cpu& cpu,
         // Single-stepping still moves the clock, so events stay in
         // step with the instruction stream while debugging.
         scheduler.advance(cpu.step());
-        dispatch_due_events(scheduler, timing);
+        dispatch_due_events(cpu.bus, scheduler, timing);
     }
     ImGui::SameLine();
     if (ImGui::Button("Reset")) {
@@ -124,9 +129,11 @@ void draw_cpu_window(Cpu& cpu,
     ImGui::Text("pc %08X  hi %08X  lo %08X", cpu.pc, cpu.hi, cpu.lo);
     ImGui::Text("sr %08X  cause %08X  epc %08X  bad %08X",
                 cpu.sr,
-                cpu.cause,
+                cpu.cause_register(),
                 cpu.epc,
                 cpu.bad_vaddr);
+    ImGui::Text(
+        "i_stat %04X  i_mask %04X", cpu.bus.irq.status, cpu.bus.irq.mask);
     ImGui::Separator();
     for (int i = 0; i < 32; i++) {
         if (i % 4 != 0) {

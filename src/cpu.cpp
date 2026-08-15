@@ -32,6 +32,13 @@ constexpr u32 CAUSE_BRANCH_DELAY = 1u << 31;
 constexpr u32 INTERRUPT_SHIFT = 8;
 constexpr u32 INTERRUPT_MASK = 0xFF;
 
+// Of those eight lines the R3000A offers, the PSX wires up exactly
+// one: IP2, driven by the interrupt controller, which every device in
+// the machine shares. IP0 and IP1 are software-settable and used as a
+// way to post an interrupt to yourself; the rest are unconnected.
+constexpr u32 CAUSE_HARDWARE_INTERRUPT = 1 << 10;  // IP2
+constexpr u32 CAUSE_SOFTWARE_INTERRUPTS = 0x300;   // IP1..IP0
+
 // MIPS instruction encoding. Every instruction is exactly 32 bits and
 // its fields sit at fixed bit positions, so decoding is a shift and a
 // mask rather than a parse. Three layouts share those positions:
@@ -206,12 +213,20 @@ void Cpu::raise_address_error(Exception code, u32 addr)
     raise_exception(code);
 }
 
+u32 Cpu::cause_register() const
+{
+    if (!bus.irq.active()) {
+        return cause;
+    }
+    return cause | CAUSE_HARDWARE_INTERRUPT;
+}
+
 bool Cpu::interrupt_pending() const
 {
     if ((sr & SR_INTERRUPT_ENABLE) == 0) {
         return false;
     }
-    const u32 pending = (cause >> INTERRUPT_SHIFT) & INTERRUPT_MASK;
+    const u32 pending = (cause_register() >> INTERRUPT_SHIFT) & INTERRUPT_MASK;
     const u32 enabled = (sr >> INTERRUPT_SHIFT) & INTERRUPT_MASK;
     return (pending & enabled) != 0;
 }
@@ -584,7 +599,7 @@ void Cpu::execute_cop0(u32 instr)
             schedule_load(rt(instr), sr);
             break;
         case 13:
-            schedule_load(rt(instr), cause);
+            schedule_load(rt(instr), cause_register());
             break;
         case 14:
             schedule_load(rt(instr), epc);
@@ -599,6 +614,17 @@ void Cpu::execute_cop0(u32 instr)
         case 12:
             sr = reg(rt(instr));
             break;
+        case 13: {
+            // Only the two software interrupt bits are writable. The
+            // rest of Cause is the hardware's to report, and IP2 in
+            // particular is cleared at the interrupt controller, never
+            // here — the BIOS still writes the whole register, so the
+            // other bits are dropped rather than refused.
+            const u32 value = reg(rt(instr));
+            cause &= ~CAUSE_SOFTWARE_INTERRUPTS;
+            cause |= value & CAUSE_SOFTWARE_INTERRUPTS;
+            break;
+        }
         default:
             // breakpoint registers etc. — the BIOS zeroes them
             if (reg(rt(instr)) != 0) {

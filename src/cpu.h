@@ -36,6 +36,13 @@ struct Cpu {
     // halted.
     u32 step();
 
+    // Cause as software sees it, with the interrupt controller's line
+    // merged into bit IP2. That bit is deliberately not stored: on
+    // hardware it follows the controller's output continuously, so
+    // acknowledging the last pending interrupt lowers it with no write
+    // to Cause anywhere.
+    u32 cause_register() const;
+
     Bus& bus;
 
     // regs holds the values instructions read; writes go to out_regs
@@ -58,8 +65,12 @@ struct Cpu {
     // state and is accessed only via MFC0/MTC0.
     u32 bad_vaddr = 0;  // COP0 r8: address of the last address error
     u32 sr = 0;         // COP0 r12: status register
-    u32 cause = 0;      // COP0 r13: exception cause
     u32 epc = 0;        // COP0 r14: exception return address
+
+    // COP0 r13: exception cause. Stored without its IP2 bit, which is
+    // not state at all but a wire from the interrupt controller — see
+    // cause_register(), which is what software reads.
+    u32 cause = 0;
 
     // whether the instruction being executed sits in a branch delay
     // slot (an exception there must report the branch's address)
