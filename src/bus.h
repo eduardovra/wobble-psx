@@ -4,6 +4,7 @@
 #include <string>
 #include <unordered_set>
 
+#include "gpu.h"
 #include "irq.h"
 #include "types.h"
 
@@ -28,9 +29,14 @@ struct Bus {
     bool load_bios(const std::string& path);
 
     // Reads and writes take virtual addresses, as the CPU sees them.
-    u8 read8(u32 addr) const;
-    u16 read16(u32 addr) const;
-    u32 read32(u32 addr) const;
+    //
+    // Reads are not const: reading a hardware register is an event the
+    // device sees, and some of them answer differently next time
+    // because of it. GPUREAD hands back the next pixel of a transfer
+    // and steps past it, which a const read could not do.
+    u8 read8(u32 addr);
+    u16 read16(u32 addr);
+    u32 read32(u32 addr);
     void write8(u32 addr, u8 value);
     void write16(u32 addr, u16 value);
     void write32(u32 addr, u32 value);
@@ -43,7 +49,7 @@ struct Bus {
     // the middle of a register falls through to the unimplemented
     // default instead of returning a shifted value. Nothing does that
     // to the registers implemented so far.
-    bool read_io(u32 phys, u32& value) const;
+    bool read_io(u32 phys, u32& value);
     bool write_io(u32 phys, u32 value);
 
     // Records an address that no device claimed, and reports whether
@@ -55,16 +61,15 @@ struct Bus {
     //
     // Keyed on the address alone: a read and a write to the same
     // register are one missing device, not two.
-    bool note_unhandled(u32 addr) const;
+    bool note_unhandled(u32 addr);
 
     std::array<u8, RAM_SIZE> ram{};
     std::array<u8, BIOS_SIZE> bios{};
 
     Irq irq;
+    Gpu gpu;
 
-    // Mutable because the read paths are const: noting an address is
-    // bookkeeping about the emulator, not a change to the machine.
     // Bounded by the number of distinct unhandled addresses a game
     // actually touches, which is small.
-    mutable std::unordered_set<u32> reported_addresses;
+    std::unordered_set<u32> reported_addresses;
 };

@@ -1,0 +1,302 @@
+#include <cstddef>
+#include <memory>
+
+#include <doctest/doctest.h>
+
+#include "bus.h"
+#include "gpu.h"
+
+namespace {
+
+// Builds a GP0 command word from its command byte, the rest being
+// parameters the length does not depend on.
+constexpr u32 gp0(u32 op) { return op << 24; }
+
+}  // namespace
+
+// A wrong length is invisible until some later command is misread, so
+// each family is checked directly rather than through its effects.
+TEST_CASE("GP0 command lengths follow the command byte")
+{
+    SUBCASE("the bare commands are one word")
+    {
+        CHECK(gp0_length(gp0(0x00)) == 1);  // NOP
+        CHECK(gp0_length(gp0(0x01)) == 1);  // clear texture cache
+        CHECK(gp0_length(gp0(0x1F)) == 1);  // interrupt request
+        CHECK(gp0_length(gp0(0xE1)) == 1);  // draw mode
+        CHECK(gp0_length(gp0(0xE6)) == 1);  // mask settings
+    }
+
+    SUBCASE("a rectangle fill carries a corner and a size")
+    {
+        CHECK(gp0_length(gp0(0x02)) == 3);
+    }
+
+    SUBCASE("polygons grow with vertices, texture and shading")
+    {
+        CHECK(gp0_length(gp0(0x20)) == 4);   // flat triangle
+        CHECK(gp0_length(gp0(0x28)) == 5);   // flat quad
+        CHECK(gp0_length(gp0(0x24)) == 7);   // textured triangle
+        CHECK(gp0_length(gp0(0x2C)) == 9);   // textured quad
+        CHECK(gp0_length(gp0(0x30)) == 6);   // gouraud triangle
+        CHECK(gp0_length(gp0(0x38)) == 8);   // gouraud quad
+        CHECK(gp0_length(gp0(0x3C)) == 12);  // gouraud textured quad
+    }
+
+    SUBCASE("the longest command still fits the buffer")
+    {
+        CHECK(gp0_length(gp0(0x3C)) <= Gpu::COMMAND_MAX_WORDS);
+    }
+
+    SUBCASE("lines are two vertices, plus a colour when shaded")
+    {
+        CHECK(gp0_length(gp0(0x40)) == 3);
+        CHECK(gp0_length(gp0(0x50)) == 4);
+    }
+
+    SUBCASE("rectangles carry a size only when it is not fixed")
+    {
+        CHECK(gp0_length(gp0(0x60)) == 3);  // variable size
+        CHECK(gp0_length(gp0(0x68)) == 2);  // 1x1
+        CHECK(gp0_length(gp0(0x70)) == 2);  // 8x8
+        CHECK(gp0_length(gp0(0x78)) == 2);  // 16x16
+        CHECK(gp0_length(gp0(0x64)) == 4);  // textured, variable size
+        CHECK(gp0_length(gp0(0x74)) == 3);  // textured 8x8
+    }
+
+    SUBCASE("the transfer commands carry their rectangle")
+    {
+        CHECK(gp0_length(gp0(0x80)) == 4);  // VRAM to VRAM
+        CHECK(gp0_length(gp0(0xA0)) == 3);  // CPU to VRAM
+        CHECK(gp0_length(gp0(0xC0)) == 3);  // VRAM to CPU
+    }
+}
+
+TEST_CASE("a command takes effect only once all its words have arrived")
+{
+    Gpu gpu;
+
+    // A rectangle fill is three words; the first two are just
+    // collected.
+    gpu.write_gp0(gp0(0x02));
+    gpu.write_gp0(0x00000000);
+    CHECK(gpu.command_words == 2);
+
+    gpu.write_gp0(0x00100010);
+    CHECK(gpu.command_words == 0);  // executed and the buffer released
+}
+
+TEST_CASE("the drawing registers are what GPUSTAT reports back")
+{
+    Gpu gpu;
+
+    // GP0(E1h) bits 0..10 appear unchanged in GPUSTAT, and its
+    // texture-disable bit moves from 11 to 15.
+    gpu.write_gp0(gp0(0xE1) | 0x7FF);
+    CHECK((gpu.status() & 0x7FF) == 0x7FF);
+    CHECK((gpu.status() & (1u << 15)) == 0);
+
+    gpu.write_gp0(gp0(0xE1) | (1u << 11));
+    CHECK((gpu.status() & (1u << 15)) != 0);
+
+    // GP0(E6h)'s two mask bits land at 11 and 12.
+    gpu.write_gp0(gp0(0xE6) | 0x3);
+    CHECK((gpu.status() & (0x3u << 11)) == (0x3u << 11));
+}
+
+TEST_CASE("the display mode word is unpacked into GPUSTAT")
+{
+    Gpu gpu;
+
+    gpu.write_gp1((0x08u << 24) | (1u << 3));  // PAL
+    CHECK((gpu.status() & (1u << 20)) != 0);
+
+    gpu.write_gp1((0x08u << 24) | (1u << 5));  // vertical interlace
+    CHECK((gpu.status() & (1u << 22)) != 0);
+    CHECK((gpu.status() & (1u << 20)) == 0);  // and no longer PAL
+}
+
+TEST_CASE("the interlace field alternates once a field has passed")
+{
+    Gpu gpu;
+    constexpr u32 FIELD = 1u << 13;
+    constexpr u32 DRAWING_ODD = 1u << 31;
+
+    SUBCASE("a progressive display has no field to report")
+    {
+        gpu.write_gp1(0x08000000);  // interlace off
+        CHECK((gpu.status() & FIELD) != 0);
+        CHECK((gpu.status() & DRAWING_ODD) == 0);
+
+        gpu.next_field();
+        CHECK((gpu.status() & FIELD) != 0);  // and it does not move
+        CHECK((gpu.status() & DRAWING_ODD) == 0);
+    }
+
+    SUBCASE("an interlaced one alternates every vertical blank")
+    {
+        gpu.write_gp1((0x08u << 24) | (1u << 5));
+        CHECK((gpu.status() & FIELD) == 0);
+        CHECK((gpu.status() & DRAWING_ODD) == 0);
+
+        // Software paces itself by watching this change, so a bit that
+        // never moves leaves it waiting forever.
+        gpu.next_field();
+        CHECK((gpu.status() & FIELD) != 0);
+        CHECK((gpu.status() & DRAWING_ODD) != 0);
+
+        gpu.next_field();
+        CHECK((gpu.status() & FIELD) == 0);
+    }
+}
+
+TEST_CASE("the GPU reports itself ready except while loading an image")
+{
+    Gpu gpu;
+    constexpr u32 READY_FOR_DMA = 1u << 28;
+    constexpr u32 READY_FOR_COMMAND = 1u << 26;
+    constexpr u32 READY_TO_SEND = 1u << 27;
+
+    CHECK((gpu.status() & READY_FOR_DMA) != 0);
+    CHECK((gpu.status() & READY_FOR_COMMAND) != 0);
+    CHECK((gpu.status() & READY_TO_SEND) == 0);
+
+    // A 2x1 transfer into VRAM: one word of pixels to come.
+    gpu.write_gp0(gp0(0xA0));
+    gpu.write_gp0(0);
+    gpu.write_gp0((1u << 16) | 2);
+    CHECK((gpu.status() & READY_FOR_DMA) == 0);
+    CHECK((gpu.status() & READY_FOR_COMMAND) == 0);
+
+    gpu.write_gp0(0x11112222);
+    CHECK((gpu.status() & READY_FOR_DMA) != 0);
+}
+
+TEST_CASE("an image is written into VRAM two pixels to a word")
+{
+    Gpu gpu;
+
+    gpu.write_gp0(gp0(0xA0));
+    gpu.write_gp0((3u << 16) | 5);  // to x=5, y=3
+    gpu.write_gp0((2u << 16) | 2);  // a 2x2 rectangle
+    gpu.write_gp0(0xBBBBAAAA);      // the low half is the first pixel
+    gpu.write_gp0(0xDDDDCCCC);
+
+    CHECK(gpu.vram[std::size_t{3} * Gpu::VRAM_WIDTH + 5] == 0xAAAA);
+    CHECK(gpu.vram[std::size_t{3} * Gpu::VRAM_WIDTH + 6] == 0xBBBB);
+    CHECK(gpu.vram[std::size_t{4} * Gpu::VRAM_WIDTH + 5] == 0xCCCC);
+    CHECK(gpu.vram[std::size_t{4} * Gpu::VRAM_WIDTH + 6] == 0xDDDD);
+
+    // The rectangle ended where it said it would.
+    CHECK(gpu.vram[std::size_t{3} * Gpu::VRAM_WIDTH + 7] == 0);
+}
+
+TEST_CASE("an odd-sized image ignores the spare half of its last word")
+{
+    Gpu gpu;
+
+    gpu.write_gp0(gp0(0xA0));
+    gpu.write_gp0(0);
+    gpu.write_gp0((1u << 16) | 1);  // a single pixel
+    gpu.write_gp0(0xFFFF1234);
+
+    CHECK(gpu.vram[0] == 0x1234);
+    CHECK(gpu.vram[1] == 0);
+    // And the GPU is back to taking commands rather than expecting
+    // another word of pixels.
+    CHECK(gpu.command_words == 0);
+    gpu.write_gp0(gp0(0xE1) | 0x5);
+    CHECK((gpu.status() & 0x7FF) == 0x5);
+}
+
+TEST_CASE("a VRAM to CPU transfer reads back through GPUREAD")
+{
+    Gpu gpu;
+    gpu.vram[0] = 0x1111;
+    gpu.vram[1] = 0x2222;
+
+    gpu.write_gp0(gp0(0xC0));
+    gpu.write_gp0(0);
+    gpu.write_gp0((1u << 16) | 2);
+
+    CHECK((gpu.status() & (1u << 27)) != 0);  // ready to send
+    CHECK(gpu.read() == 0x22221111);
+    CHECK((gpu.status() & (1u << 27)) == 0);  // and done
+}
+
+TEST_CASE("a polyline runs until its terminator")
+{
+    Gpu gpu;
+
+    gpu.write_gp0(gp0(0x48));  // polyline, flat shaded
+    gpu.write_gp0(0x00000000);
+    gpu.write_gp0(0x00100010);
+    // Further vertices, however many, are consumed rather than being
+    // read as new commands.
+    gpu.write_gp0(0x00200020);
+    gpu.write_gp0(0x00300030);
+    gpu.write_gp0(0x55555555);
+
+    // Back in step: the next word starts a command again.
+    gpu.write_gp0(gp0(0xE1) | 0x123);
+    CHECK((gpu.status() & 0x7FF) == 0x123);
+}
+
+TEST_CASE("GP1 resets the GPU and abandons a partial command")
+{
+    Gpu gpu;
+    gpu.write_gp0(gp0(0xE1) | 0x3FF);
+    gpu.write_gp0(gp0(0x02));  // a three-word command, left unfinished
+
+    SUBCASE("a full reset clears the drawing registers too")
+    {
+        gpu.write_gp1(0x00000000);
+        CHECK((gpu.status() & 0x7FF) == 0);
+    }
+    SUBCASE("resetting the command buffer leaves them alone")
+    {
+        gpu.write_gp1(0x01000000);
+        CHECK((gpu.status() & 0x7FF) == 0x3FF);
+    }
+
+    CHECK(gpu.command_words == 0);
+    // Either way the next word is read as a command.
+    gpu.write_gp0(gp0(0xE6) | 0x1);
+    CHECK((gpu.status() & (1u << 11)) != 0);
+}
+
+TEST_CASE("the DMA direction decides what the request bit answers")
+{
+    Gpu gpu;
+    constexpr u32 DMA_REQUEST = 1u << 25;
+
+    gpu.write_gp1(0x04000000);  // off
+    CHECK((gpu.status() & DMA_REQUEST) == 0);
+    CHECK((gpu.status() & (0x3u << 29)) == 0);
+
+    gpu.write_gp1(0x04000002);  // CPU to GP0, which is ready
+    CHECK((gpu.status() & DMA_REQUEST) != 0);
+    CHECK((gpu.status() & (0x3u << 29)) == (2u << 29));
+
+    // Mid-transfer it is not ready, and says so through the same bit.
+    gpu.write_gp0(gp0(0xA0));
+    gpu.write_gp0(0);
+    gpu.write_gp0((1u << 16) | 2);
+    CHECK((gpu.status() & DMA_REQUEST) == 0);
+}
+
+TEST_CASE("the GPU ports are reachable through the bus")
+{
+    const auto bus = std::make_unique<Bus>();
+
+    bus->write32(Gpu::GP1, 0x08000000 | (1u << 3));
+    CHECK((bus->read32(Gpu::GP1) & (1u << 20)) != 0);
+    CHECK(bus->read32(Gpu::GP1) == bus->gpu.status());
+
+    bus->write32(Gpu::GP0, gp0(0xE1) | 0x2A);
+    CHECK((bus->gpu.status() & 0x7FF) == 0x2A);
+
+    // GP1(10h) loads GPUREAD, which is the other half of 0x1F801810.
+    bus->write32(Gpu::GP1, 0x10000007);
+    CHECK(bus->read32(Gpu::GP0) == 2);  // GPU version
+}

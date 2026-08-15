@@ -48,6 +48,7 @@ void reset_machine(Cpu& cpu, Scheduler& scheduler, Timing& timing)
 {
     cpu.reset();
     cpu.bus.irq.reset();
+    cpu.bus.gpu.reset();
     scheduler.reset();
     timing = Timing{};
     scheduler.schedule_in(EventKind::VBlank, VBLANK_INTERVAL);
@@ -63,6 +64,7 @@ void dispatch_due_events(Bus& bus, Scheduler& scheduler, Timing& timing)
             // device raises its line, the controller decides whether
             // it is unmasked, and the CPU notices on its next step.
             bus.irq.raise(Interrupt::VBlank);
+            bus.gpu.next_field();
             // Nothing is periodic on its own; a repeating event asks
             // for its next occurrence as it fires. Counting from the
             // deadline rather than from now keeps it exactly on rate.

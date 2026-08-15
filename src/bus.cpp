@@ -72,7 +72,7 @@ void write_to(std::array<u8, N>& mem, u32 offset, T value)
 
 }  // namespace
 
-bool Bus::read_io(u32 phys, u32& value) const
+bool Bus::read_io(u32 phys, u32& value)
 {
     switch (phys) {
     case Irq::STATUS:
@@ -80,6 +80,12 @@ bool Bus::read_io(u32 phys, u32& value) const
         return true;
     case Irq::MASK:
         value = irq.mask;
+        return true;
+    case Gpu::GP0:
+        value = gpu.read();
+        return true;
+    case Gpu::GP1:
+        value = gpu.status();
         return true;
     default:
         return false;
@@ -95,12 +101,18 @@ bool Bus::write_io(u32 phys, u32 value)
     case Irq::MASK:
         irq.mask = static_cast<u16>(value);
         return true;
+    case Gpu::GP0:
+        gpu.write_gp0(value);
+        return true;
+    case Gpu::GP1:
+        gpu.write_gp1(value);
+        return true;
     default:
         return false;
     }
 }
 
-bool Bus::note_unhandled(u32 addr) const
+bool Bus::note_unhandled(u32 addr)
 {
     return reported_addresses.insert(addr).second;
 }
@@ -116,7 +128,7 @@ bool Bus::load_bios(const std::string& path)
     return std::cmp_equal(file.gcount(), bios.size());
 }
 
-u32 Bus::read32(u32 addr) const
+u32 Bus::read32(u32 addr)
 {
     const u32 phys = to_physical(addr);
     if (phys < RAM_SIZE) {
@@ -136,7 +148,7 @@ u32 Bus::read32(u32 addr) const
     return 0;
 }
 
-u16 Bus::read16(u32 addr) const
+u16 Bus::read16(u32 addr)
 {
     const u32 phys = to_physical(addr);
     if (phys < RAM_SIZE) {
@@ -156,7 +168,7 @@ u16 Bus::read16(u32 addr) const
     return 0;
 }
 
-u8 Bus::read8(u32 addr) const
+u8 Bus::read8(u32 addr)
 {
     const u32 phys = to_physical(addr);
     if (phys < RAM_SIZE) {
