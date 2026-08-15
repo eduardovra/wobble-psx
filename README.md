@@ -40,6 +40,18 @@ Nothing the debugger does changes what the machine does — a test
 asserts that a traced, watched, profiled run reaches the same state as
 a plain one, since everything else here depends on it.
 
+Anything that has to reach the BIOS wants a second, optimised build.
+Getting past the kernel's startup takes tens of millions of
+instructions, which the sanitisers turn from seconds into minutes:
+
+```sh
+cmake -B build-rel -G Ninja -DCMAKE_BUILD_TYPE=Release
+cmake --build build-rel --target wobble-dbg
+./build-rel/wobble-dbg SCPH1001.BIN -c "frames #150" -c "regs"
+```
+
+Keep the Debug build for the tests, where the sanitisers are the point.
+
 ## Tests
 
 ```sh
