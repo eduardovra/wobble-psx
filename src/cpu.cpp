@@ -9,13 +9,28 @@ namespace {
 // region.
 constexpr u32 RESET_PC = 0xBFC00000;
 
+// What one instruction costs the master clock. A flat charge is a
+// deliberate placeholder: the real chip pays extra for memory waits,
+// multiply/divide latency and cache misses, and refining any of that
+// means returning a per-instruction figure from step() instead of
+// this one. Games need a clock that advances at roughly the right
+// rate far more than they need it to be exact.
+constexpr u32 CYCLES_PER_INSTRUCTION = 1;
+
 // Status register bits. Isolating the cache redirects stores into the
 // scratchpad instead of memory; the BIOS does this while it clears the
 // cache at boot.
+constexpr u32 SR_INTERRUPT_ENABLE = 1 << 0;  // IEc, the current level
 constexpr u32 SR_ISOLATE_CACHE = 1 << 16;
 constexpr u32 SR_BOOT_VECTORS = 1 << 22;  // BEV: vectors in ROM
 
+constexpr u32 CAUSE_EXC_CODE = 0x7C;  // bits 6..2
 constexpr u32 CAUSE_BRANCH_DELAY = 1u << 31;
+
+// SR and Cause both carry an 8-bit interrupt field at bits 15..8:
+// which lines are pending, and which of them are unmasked.
+constexpr u32 INTERRUPT_SHIFT = 8;
+constexpr u32 INTERRUPT_MASK = 0xFF;
 
 // MIPS instruction encoding. Every instruction is exactly 32 bits and
 // its fields sit at fixed bit positions, so decoding is a shift and a
@@ -66,6 +81,7 @@ void Cpu::reset()
     current_pc = pc;
     hi = 0;
     lo = 0;
+    bad_vaddr = 0;
     sr = 0;
     cause = 0;
     epc = 0;
@@ -77,10 +93,10 @@ void Cpu::reset()
     halt_reason.clear();
 }
 
-void Cpu::step()
+u32 Cpu::step()
 {
     if (halted) {
-        return;
+        return 0;
     }
 
     current_pc = pc;
@@ -96,29 +112,41 @@ void Cpu::step()
         tty += static_cast<char>(regs[4]);
     }
 
-    const u32 instr = bus.read32(pc);
-
-    // Advance both counters before executing, so a branch taken by
-    // this instruction rewrites next_pc while pc — already pointing at
-    // the delay slot — is left alone.
-    pc = next_pc;
-    next_pc += 4;
-
     // A branch set `branching` on the previous step, which makes this
-    // instruction its delay slot.
+    // instruction its delay slot. Settled before anything can raise an
+    // exception, since that is what decides the reported epc.
     in_delay_slot = branching;
     branching = false;
 
     // The load issued by the previous instruction lands now; the
-    // current instruction's own write (below) overrides it.
+    // current instruction's own write (below) overrides it. It
+    // completes even if this step faults — the load already happened.
     set_reg(load_reg, load_value);
     load_reg = 0;
     load_value = 0;
 
-    execute(instr);
+    if (interrupt_pending()) {
+        // Taken in place of the instruction, which re-runs on return.
+        raise_exception(Exception::Interrupt);
+    } else if (current_pc % 4 != 0) {
+        // A jump to a misaligned address faults on the fetch itself.
+        raise_address_error(Exception::AddressLoad, current_pc);
+    } else {
+        const u32 instr = bus.read32(current_pc);
+
+        // Advance both counters before executing, so a branch taken by
+        // this instruction rewrites next_pc while pc — already
+        // pointing at the delay slot — is left alone.
+        pc = next_pc;
+        next_pc += 4;
+
+        execute(instr);
+    }
 
     // Writes made by this instruction become readable from here on.
     regs = out_regs;
+
+    return CYCLES_PER_INSTRUCTION;
 }
 
 void Cpu::set_reg(u32 index, u32 value)
@@ -152,8 +180,12 @@ void Cpu::raise_exception(Exception code)
     const u32 mode = sr & 0x3F;
     sr = (sr & ~0x3Fu) | ((mode << 2) & 0x3F);
 
-    // ExcCode sits at bits 6..2 of Cause.
-    cause = static_cast<u32>(code) << 2;
+    // Update only the fields this exception owns. The pending-
+    // interrupt bits belong to the interrupt controller, so Cause is
+    // edited rather than overwritten; BD is rewritten every time so a
+    // previous delay-slot exception cannot leave it set.
+    cause &= ~(CAUSE_EXC_CODE | CAUSE_BRANCH_DELAY);
+    cause |= (static_cast<u32>(code) << 2) & CAUSE_EXC_CODE;
 
     epc = current_pc;
     if (in_delay_slot) {
@@ -166,6 +198,22 @@ void Cpu::raise_exception(Exception code)
     const bool use_rom_vector = sr & SR_BOOT_VECTORS;
     pc = use_rom_vector ? 0xBFC00180 : 0x80000080;
     next_pc = pc + 4;  // exception entry has no delay slot
+}
+
+void Cpu::raise_address_error(Exception code, u32 addr)
+{
+    bad_vaddr = addr;
+    raise_exception(code);
+}
+
+bool Cpu::interrupt_pending() const
+{
+    if ((sr & SR_INTERRUPT_ENABLE) == 0) {
+        return false;
+    }
+    const u32 pending = (cause >> INTERRUPT_SHIFT) & INTERRUPT_MASK;
+    const u32 enabled = (sr >> INTERRUPT_SHIFT) & INTERRUPT_MASK;
+    return (pending & enabled) != 0;
 }
 
 void Cpu::halt(std::string reason)
@@ -242,7 +290,7 @@ void Cpu::execute(u32 instr)
         const s32 b = static_cast<s32>(imm_se(instr));
         s32 result = 0;
         if (__builtin_add_overflow(a, b, &result)) {
-            halt(std::format("ADDI overflow at {:08X}", current_pc));
+            raise_exception(Exception::Overflow);
             break;
         }
         set_reg(rt(instr), static_cast<u32>(result));
@@ -294,7 +342,7 @@ void Cpu::execute(u32 instr)
     case 0x21: {  // LH
         const u32 addr = reg(rs(instr)) + imm_se(instr);
         if (addr % 2 != 0) {
-            halt(std::format("unaligned LH at {:08X}", current_pc));
+            raise_address_error(Exception::AddressLoad, addr);
             break;
         }
         const s16 value = static_cast<s16>(bus.read16(addr));
@@ -304,7 +352,7 @@ void Cpu::execute(u32 instr)
     case 0x23: {  // LW
         const u32 addr = reg(rs(instr)) + imm_se(instr);
         if (addr % 4 != 0) {
-            halt(std::format("unaligned LW at {:08X}", current_pc));
+            raise_address_error(Exception::AddressLoad, addr);
             break;
         }
         schedule_load(rt(instr), bus.read32(addr));
@@ -318,7 +366,7 @@ void Cpu::execute(u32 instr)
     case 0x25: {  // LHU
         const u32 addr = reg(rs(instr)) + imm_se(instr);
         if (addr % 2 != 0) {
-            halt(std::format("unaligned LHU at {:08X}", current_pc));
+            raise_address_error(Exception::AddressLoad, addr);
             break;
         }
         schedule_load(rt(instr), bus.read16(addr));
@@ -338,7 +386,7 @@ void Cpu::execute(u32 instr)
         }
         const u32 addr = reg(rs(instr)) + imm_se(instr);
         if (addr % 2 != 0) {
-            halt(std::format("unaligned SH at {:08X}", current_pc));
+            raise_address_error(Exception::AddressStore, addr);
             break;
         }
         bus.write16(addr, static_cast<u16>(reg(rt(instr))));
@@ -350,7 +398,7 @@ void Cpu::execute(u32 instr)
         }
         const u32 addr = reg(rs(instr)) + imm_se(instr);
         if (addr % 4 != 0) {
-            halt(std::format("unaligned SW at {:08X}", current_pc));
+            raise_address_error(Exception::AddressStore, addr);
             break;
         }
         bus.write32(addr, reg(rt(instr)));
@@ -476,7 +524,7 @@ void Cpu::execute_special(u32 instr)
         const s32 b = static_cast<s32>(reg(rt(instr)));
         s32 result = 0;
         if (__builtin_add_overflow(a, b, &result)) {
-            halt(std::format("ADD overflow at {:08X}", current_pc));
+            raise_exception(Exception::Overflow);
             break;
         }
         set_reg(rd(instr), static_cast<u32>(result));
@@ -531,6 +579,9 @@ void Cpu::execute_cop0(u32 instr)
     switch (rs(instr)) {
     case 0x00:  // MFC0 (value arrives via the load delay slot)
         switch (rd(instr)) {
+        case 8:
+            schedule_load(rt(instr), bad_vaddr);
+            break;
         case 12:
             schedule_load(rt(instr), sr);
             break;

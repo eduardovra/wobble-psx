@@ -29,9 +29,12 @@ struct Cpu {
     // reset vector.
     void reset();
 
-    // Runs one instruction: fetch at pc, retire the pending load, then
-    // execute. Does nothing once halted.
-    void step();
+    // Runs one instruction: retire the pending load, then either take
+    // an exception or fetch and execute. Returns the cycles it cost,
+    // which the caller feeds to the Scheduler — the CPU is what drives
+    // the master clock forward. Does nothing, and costs nothing, once
+    // halted.
+    u32 step();
 
     Bus& bus;
 
@@ -50,12 +53,13 @@ struct Cpu {
     u32 hi = 0;
     u32 lo = 0;
 
-    // The three COP0 (system control coprocessor) registers this
-    // emulator needs. COP0 has no general-purpose role — it holds
-    // privileged state and is accessed only via MFC0/MTC0.
-    u32 sr = 0;     // COP0 r12: status register
-    u32 cause = 0;  // COP0 r13: exception cause
-    u32 epc = 0;    // COP0 r14: exception return address
+    // The COP0 (system control coprocessor) registers this emulator
+    // needs. COP0 has no general-purpose role — it holds privileged
+    // state and is accessed only via MFC0/MTC0.
+    u32 bad_vaddr = 0;  // COP0 r8: address of the last address error
+    u32 sr = 0;         // COP0 r12: status register
+    u32 cause = 0;      // COP0 r13: exception cause
+    u32 epc = 0;        // COP0 r14: exception return address
 
     // whether the instruction being executed sits in a branch delay
     // slot (an exception there must report the branch's address)
@@ -78,8 +82,18 @@ struct Cpu {
 
     // Exception codes as they appear in the Cause register's ExcCode
     // field. Only the ones actually reached so far are listed.
+    //
+    // These are conditions the hardware defines and software may rely
+    // on — an unaligned access is a legitimate way to trap. They are
+    // distinct from an unimplemented opcode, which is a gap in this
+    // emulator and halts instead, so the missing instruction is
+    // reported rather than swallowed by the BIOS handler.
     enum class Exception : u32 {
+        Interrupt = 0x0,
+        AddressLoad = 0x4,   // unaligned or unmapped load address
+        AddressStore = 0x5,  // same, for stores
         Syscall = 0x8,
+        Overflow = 0xC,  // signed overflow in ADD/ADDI
     };
 
 private:
@@ -91,6 +105,12 @@ private:
 
     // Jumps to the exception vector, saving the return address in epc.
     void raise_exception(Exception code);
+
+    // Same, recording the offending address in BadVaddr first.
+    void raise_address_error(Exception code, u32 addr);
+
+    // Whether an unmasked interrupt is waiting with interrupts on.
+    bool interrupt_pending() const;
 
     // offset is a sign-extended 16-bit instruction count, as encoded.
     void branch(u32 offset);

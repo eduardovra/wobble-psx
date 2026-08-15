@@ -7,8 +7,11 @@
 #include <imgui_impl_sdl3.h>
 #include <imgui_impl_sdlrenderer3.h>
 
+#include <algorithm>
+
 #include "bus.h"
 #include "cpu.h"
+#include "scheduler.h"
 
 namespace {
 
@@ -22,12 +25,72 @@ constexpr const char* REG_NAMES[32] = {
     "t8",   "t9", "k0", "k1", "gp", "sp", "fp", "ra",
 };
 
-// Not cycle-accurate pacing — just a budget per video frame that
-// keeps the UI responsive while the BIOS executes.
-constexpr int INSTRUCTIONS_PER_FRAME = 100000;
+// Emulated time to run per host frame. The renderer is vsynced to
+// 60 Hz, so running one sixtieth of a second of console time per pass
+// keeps the emulator at roughly real speed.
+constexpr u64 CYCLES_PER_HOST_FRAME = CPU_CLOCK_HZ / 60;
+
+// One VBlank per NTSC field. A placeholder until there is a GPU: the
+// true rate is 59.94 Hz and comes from the video clock and scanline
+// count, not from dividing the CPU clock.
+constexpr u64 VBLANK_INTERVAL = CPU_CLOCK_HZ / 60;
+
+// Machine state that is neither CPU nor memory — for now just the
+// frames VBlank has counted, which is the only visible sign that the
+// scheduler is keeping time.
+struct Timing {
+    u64 frames = 0;
+};
+
+void reset_machine(Cpu& cpu, Scheduler& scheduler, Timing& timing)
+{
+    cpu.reset();
+    scheduler.reset();
+    timing = Timing{};
+    scheduler.schedule_in(EventKind::VBlank, VBLANK_INTERVAL);
+}
+
+void dispatch_due_events(Scheduler& scheduler, Timing& timing)
+{
+    while (const std::optional<DueEvent> event = scheduler.next_due()) {
+        switch (event->kind) {
+        case EventKind::VBlank:
+            timing.frames++;
+            // Nothing is periodic on its own; a repeating event asks
+            // for its next occurrence as it fires. Counting from the
+            // deadline rather than from now keeps it exactly on rate.
+            scheduler.schedule_at(EventKind::VBlank,
+                                  event->deadline + VBLANK_INTERVAL);
+            break;
+        case EventKind::Count:
+            break;  // sentinel, never returned
+        }
+    }
+}
+
+// Runs the console for a slice of emulated time. The CPU is let loose
+// only as far as the next deadline, so a device's event lands on the
+// exact cycle it asked for rather than whenever the loop next checks.
+void run_cycles(Cpu& cpu,
+                Scheduler& scheduler,
+                Timing& timing,
+                u64 budget)
+{
+    const u64 end = scheduler.now + budget;
+    while (scheduler.now < end && !cpu.halted) {
+        const u64 deadline = std::min(end, scheduler.next_deadline());
+        while (scheduler.now < deadline && !cpu.halted) {
+            scheduler.advance(cpu.step());
+        }
+        dispatch_due_events(scheduler, timing);
+    }
+}
 
 // Debugger panel: run/pause/step controls and the full register file.
-void draw_cpu_window(Cpu& cpu, bool& emu_running)
+void draw_cpu_window(Cpu& cpu,
+                     Scheduler& scheduler,
+                     Timing& timing,
+                     bool& emu_running)
 {
     ImGui::Begin("CPU");
 
@@ -46,18 +109,25 @@ void draw_cpu_window(Cpu& cpu, bool& emu_running)
     ImGui::SameLine();
     if (ImGui::Button("Step")) {
         emu_running = false;
-        cpu.step();
+        // Single-stepping still moves the clock, so events stay in
+        // step with the instruction stream while debugging.
+        scheduler.advance(cpu.step());
+        dispatch_due_events(scheduler, timing);
     }
     ImGui::SameLine();
     if (ImGui::Button("Reset")) {
-        cpu.reset();
+        reset_machine(cpu, scheduler, timing);
     }
 
+    ImGui::Text("cycle %llu  frame %llu",
+                static_cast<unsigned long long>(scheduler.now),
+                static_cast<unsigned long long>(timing.frames));
     ImGui::Text("pc %08X  hi %08X  lo %08X", cpu.pc, cpu.hi, cpu.lo);
-    ImGui::Text("sr %08X  cause %08X  epc %08X",
+    ImGui::Text("sr %08X  cause %08X  epc %08X  bad %08X",
                 cpu.sr,
                 cpu.cause,
-                cpu.epc);
+                cpu.epc,
+                cpu.bad_vaddr);
     ImGui::Separator();
     for (int i = 0; i < 32; i++) {
         if (i % 4 != 0) {
@@ -107,6 +177,9 @@ int main(int argc, char** argv)
         return 1;
     }
     Cpu cpu(bus);
+    Scheduler scheduler;
+    Timing timing;
+    reset_machine(cpu, scheduler, timing);
 
     if (!SDL_Init(SDL_INIT_VIDEO | SDL_INIT_GAMEPAD)) {
         SDL_Log("SDL_Init failed: %s", SDL_GetError());
@@ -150,12 +223,10 @@ int main(int argc, char** argv)
         }
 
         if (emu_running) {
-            for (int i = 0; i < INSTRUCTIONS_PER_FRAME; i++) {
-                cpu.step();
-                if (cpu.halted) {
-                    break;
-                }
-            }
+            run_cycles(cpu,
+                       scheduler,
+                       timing,
+                       CYCLES_PER_HOST_FRAME);
         }
         if (cpu.halted && !was_halted) {
             SDL_Log("cpu halted: %s", cpu.halt_reason.c_str());
@@ -167,7 +238,7 @@ int main(int argc, char** argv)
         ImGui_ImplSDL3_NewFrame();
         ImGui::NewFrame();
 
-        draw_cpu_window(cpu, emu_running);
+        draw_cpu_window(cpu, scheduler, timing, emu_running);
         draw_tty_window(cpu);
 
         ImGui::Render();
