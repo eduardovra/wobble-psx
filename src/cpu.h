@@ -128,6 +128,18 @@ private:
 
     u32 reg(u32 index) const { return regs[index]; }
 
+    // What the register will hold once this instruction retires,
+    // including a load that has not reached `regs` yet.
+    //
+    // LWL/LWR merge into this rather than into reg(), and it is the
+    // one place the load delay slot is deliberately bypassed: the pair
+    // that moves an unaligned word writes the same register on two
+    // consecutive instructions, so the second has to see what the
+    // first loaded rather than the stale value. Real hardware special-
+    // cases it the same way, which is why the pair needs no nop
+    // between its halves.
+    u32 pending_reg(u32 index) const { return out_regs[index]; }
+
     // Writes land in out_regs, so they are not visible to the current
     // instruction — see the regs/out_regs note above.
     void set_reg(u32 index, u32 value);

@@ -54,6 +54,150 @@ TEST_CASE("a write in the load delay slot beats the load")
     CHECK(m.reg(t2) == 5);
 }
 
+// The four unaligned instructions. Memory is laid out so the bytes
+// are their own labels: DATA holds 11 22 33 44 55 66 77 88, and the
+// word read from DATA+n is the four bytes starting there.
+namespace {
+
+constexpr u32 FIRST_WORD = 0x44332211;
+constexpr u32 SECOND_WORD = 0x88776655;
+
+void fill_bytes(Machine& m)
+{
+    m.bus->write32(Machine::DATA, FIRST_WORD);
+    m.bus->write32(Machine::DATA + 4, SECOND_WORD);
+}
+
+}  // namespace
+
+TEST_CASE("an LWL/LWR pair loads a word from any alignment")
+{
+    Machine m;
+    fill_bytes(m);
+
+    s32 offset = 0;
+    u32 expected = 0;
+    SUBCASE("aligned")
+    {
+        offset = 0;
+        expected = 0x44332211;
+    }
+    SUBCASE("one byte in")
+    {
+        offset = 1;
+        expected = 0x55443322;
+    }
+    SUBCASE("two bytes in")
+    {
+        offset = 2;
+        expected = 0x66554433;
+    }
+    SUBCASE("three bytes in")
+    {
+        offset = 3;
+        expected = 0x77665544;
+    }
+
+    m.load({
+        addiu(t1, zero, Machine::DATA),
+        addiu(t0, zero, -1),  // prefilled, so nothing stale may show
+        lwl(t0, t1, offset + 3),
+        lwr(t0, t1, offset),
+        nop(),  // the pair's result lands here
+    });
+    m.run(5);
+
+    CHECK(m.reg(t0) == expected);
+}
+
+TEST_CASE("the halves of an unaligned load need no nop between them")
+{
+    Machine m;
+    fill_bytes(m);
+    m.load({
+        addiu(t1, zero, Machine::DATA),
+        addiu(t0, zero, -1),
+        lwl(t0, t1, 4),  // its result is still in the load delay slot
+        lwr(t0, t1, 1),  // and this must merge into that, not into $t0
+        nop(),
+    });
+    m.run(5);
+
+    // Merging into the stale register would leave the prefill behind
+    // as 0xFF443322 instead.
+    CHECK(m.reg(t0) == 0x55443322);
+}
+
+TEST_CASE("LWL and LWR each leave the rest of the register alone")
+{
+    Machine m;
+    fill_bytes(m);
+
+    SUBCASE("LWL replaces only the high bytes")
+    {
+        m.load({
+            addiu(t1, zero, Machine::DATA),
+            lui(t0, 0xAABB),
+            ori(t0, t0, 0xCCDD),
+            lwl(t0, t1, 0),
+            nop(),
+        });
+        m.run(5);
+        CHECK(m.reg(t0) == 0x11BBCCDD);
+    }
+    SUBCASE("LWR replaces only the low bytes")
+    {
+        m.load({
+            addiu(t1, zero, Machine::DATA),
+            lui(t0, 0xAABB),
+            ori(t0, t0, 0xCCDD),
+            lwr(t0, t1, 3),
+            nop(),
+        });
+        m.run(5);
+        CHECK(m.reg(t0) == 0xAABBCC44);
+    }
+}
+
+TEST_CASE("an SWL/SWR pair stores a word without disturbing its neighbours")
+{
+    Machine m;
+    fill_bytes(m);
+    m.load({
+        addiu(t1, zero, Machine::DATA),
+        lui(t0, 0xDDCC),
+        ori(t0, t0, 0xBBAA),
+        swl(t0, t1, 4),  // the word being stored starts at DATA+1
+        swr(t0, t1, 1),
+    });
+    m.run(5);
+
+    CHECK(m.bus->read32(Machine::DATA) == 0xCCBBAA11);
+    CHECK(m.bus->read32(Machine::DATA + 4) == 0x887766DD);
+
+    // The bytes to either side of the four written are untouched.
+    CHECK(m.bus->read8(Machine::DATA) == 0x11);
+    CHECK(m.bus->read8(Machine::DATA + 5) == 0x66);
+}
+
+TEST_CASE("the unaligned instructions never fault on alignment")
+{
+    Machine m;
+    fill_bytes(m);
+    m.load({
+        addiu(t1, zero, Machine::DATA),
+        lwl(t0, t1, 1),
+        lwr(t0, t1, 2),
+        swl(t0, t1, 1),
+        swr(t0, t1, 2),
+    });
+    m.run(5);
+
+    CHECK_FALSE(m.cpu.halted);
+    // Still running straight through, rather than sitting on a vector.
+    CHECK(m.cpu.pc == Machine::CODE + 5 * 4);
+}
+
 TEST_CASE("the branch delay slot runs and the branch still takes")
 {
     Machine m;

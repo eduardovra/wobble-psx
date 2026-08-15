@@ -24,6 +24,9 @@ constexpr u32 SR_INTERRUPT_ENABLE = 1 << 0;  // IEc, the current level
 constexpr u32 SR_ISOLATE_CACHE = 1 << 16;
 constexpr u32 SR_BOOT_VECTORS = 1 << 22;  // BEV: vectors in ROM
 
+// Shifted to build the byte masks the unaligned loads and stores use.
+constexpr u32 ALL_ONES = 0xFFFFFFFF;
+
 constexpr u32 CAUSE_EXC_CODE = 0x7C;  // bits 6..2
 constexpr u32 CAUSE_BRANCH_DELAY = 1u << 31;
 
@@ -345,9 +348,9 @@ void Cpu::execute(u32 instr)
     // Loads and stores, the only instructions that touch memory. All
     // of them address as register + sign-extended offset. Loads take
     // effect one instruction later (schedule_load); stores are
-    // immediate. Anything wider than a byte must be aligned — real
-    // hardware raises an exception, which this emulator does not
-    // implement yet, so it halts instead.
+    // immediate. Anything wider than a byte must be aligned, and
+    // raises AdEL/AdES if it is not — except the four instructions
+    // below, which exist precisely to get at unaligned data.
     case 0x20: {  // LB
         const u32 addr = reg(rs(instr)) + imm_se(instr);
         const s8 value = static_cast<s8>(bus.read8(addr));
@@ -362,6 +365,28 @@ void Cpu::execute(u32 instr)
         }
         const s16 value = static_cast<s16>(bus.read16(addr));
         schedule_load(rt(instr), static_cast<u32>(value));
+        break;
+    }
+    // LWL/LWR and SWL/SWR (0x22, 0x26, 0x2A, 0x2E) move a word that
+    // straddles an alignment boundary. Each works on the aligned word
+    // *containing* the address and transfers only the bytes on one
+    // side of it, so a pair moves any unaligned word in two
+    // instructions:
+    //
+    //   lwl $t0, 3($a0)     ; the bytes at the high end of the word
+    //   lwr $t0, 0($a0)     ; the bytes at the low end
+    //
+    // Left and right name the ends of the *register*, not of memory,
+    // and this is a little-endian machine, so LWL takes the register's
+    // high bytes from the low end of the addressed word. The address's
+    // low two bits say how far to shift; the access itself is aligned,
+    // so none of the four can fault on alignment.
+    case 0x22: {  // LWL
+        const u32 addr = reg(rs(instr)) + imm_se(instr);
+        const u32 word = bus.read32(addr & ~3u);
+        const u32 shift = 24 - (addr & 3) * 8;
+        const u32 kept = pending_reg(rt(instr)) & ~(ALL_ONES << shift);
+        schedule_load(rt(instr), kept | (word << shift));
         break;
     }
     case 0x23: {  // LW
@@ -387,6 +412,14 @@ void Cpu::execute(u32 instr)
         schedule_load(rt(instr), bus.read16(addr));
         break;
     }
+    case 0x26: {  // LWR — the other half of the pair described above
+        const u32 addr = reg(rs(instr)) + imm_se(instr);
+        const u32 word = bus.read32(addr & ~3u);
+        const u32 shift = (addr & 3) * 8;
+        const u32 kept = pending_reg(rt(instr)) & ~(ALL_ONES >> shift);
+        schedule_load(rt(instr), kept | (word >> shift));
+        break;
+    }
     case 0x28: {  // SB
         if (sr & SR_ISOLATE_CACHE) {
             break;  // cache writes, not memory — ignore for now
@@ -407,6 +440,19 @@ void Cpu::execute(u32 instr)
         bus.write16(addr, static_cast<u16>(reg(rt(instr))));
         break;
     }
+    case 0x2A: {  // SWL — the store side, same shape as LWL
+        if (sr & SR_ISOLATE_CACHE) {
+            break;
+        }
+        const u32 addr = reg(rs(instr)) + imm_se(instr);
+        const u32 aligned = addr & ~3u;
+        const u32 shift = 24 - (addr & 3) * 8;
+        // Read-modify-write: the bytes outside the transfer have to
+        // survive, since the store covers only part of the word.
+        const u32 kept = bus.read32(aligned) & ~(ALL_ONES >> shift);
+        bus.write32(aligned, kept | (reg(rt(instr)) >> shift));
+        break;
+    }
     case 0x2B: {  // SW
         if (sr & SR_ISOLATE_CACHE) {
             break;  // cache writes, not memory — ignore for now
@@ -417,6 +463,17 @@ void Cpu::execute(u32 instr)
             break;
         }
         bus.write32(addr, reg(rt(instr)));
+        break;
+    }
+    case 0x2E: {  // SWR
+        if (sr & SR_ISOLATE_CACHE) {
+            break;
+        }
+        const u32 addr = reg(rs(instr)) + imm_se(instr);
+        const u32 aligned = addr & ~3u;
+        const u32 shift = (addr & 3) * 8;
+        const u32 kept = bus.read32(aligned) & ~(ALL_ONES << shift);
+        bus.write32(aligned, kept | (reg(rt(instr)) << shift));
         break;
     }
     default:

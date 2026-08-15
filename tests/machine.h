@@ -92,6 +92,28 @@ constexpr u32 sw(u32 rt, u32 rs, s32 offset)
     return i_type(0x2B, rs, rt, offset);
 }
 
+// The unaligned pairs. Each half names the end of the register it
+// transfers, so lwl/lwr and swl/swr are always written together.
+constexpr u32 lwl(u32 rt, u32 rs, s32 offset)
+{
+    return i_type(0x22, rs, rt, offset);
+}
+
+constexpr u32 lwr(u32 rt, u32 rs, s32 offset)
+{
+    return i_type(0x26, rs, rt, offset);
+}
+
+constexpr u32 swl(u32 rt, u32 rs, s32 offset)
+{
+    return i_type(0x2A, rs, rt, offset);
+}
+
+constexpr u32 swr(u32 rt, u32 rs, s32 offset)
+{
+    return i_type(0x2E, rs, rt, offset);
+}
+
 constexpr u32 beq(u32 rs, u32 rt, s32 offset)
 {
     return i_type(0x04, rs, rt, offset);
