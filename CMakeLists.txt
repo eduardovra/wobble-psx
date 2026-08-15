@@ -50,6 +50,7 @@ target_link_libraries(imgui PUBLIC SDL3::SDL3)
 add_library(core STATIC
     src/bus.cpp
     src/cpu.cpp
+    src/dma.cpp
     src/gpu.cpp
     src/irq.cpp
     src/log.cpp
@@ -64,6 +65,7 @@ add_executable(tests
     tests/main.cpp
     tests/test_bus.cpp
     tests/test_cpu.cpp
+    tests/test_dma.cpp
     tests/test_gpu.cpp
     tests/test_irq.cpp
     tests/test_scheduler.cpp

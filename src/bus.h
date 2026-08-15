@@ -4,6 +4,7 @@
 #include <string>
 #include <unordered_set>
 
+#include "dma.h"
 #include "gpu.h"
 #include "irq.h"
 #include "types.h"
@@ -68,6 +69,7 @@ struct Bus {
 
     Irq irq;
     Gpu gpu;
+    Dma dma;
 
     // Bounded by the number of distinct unhandled addresses a game
     // actually touches, which is small.

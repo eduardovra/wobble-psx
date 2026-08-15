@@ -49,6 +49,7 @@ void reset_machine(Cpu& cpu, Scheduler& scheduler, Timing& timing)
     cpu.reset();
     cpu.bus.irq.reset();
     cpu.bus.gpu.reset();
+    cpu.bus.dma.reset();
     scheduler.reset();
     timing = Timing{};
     scheduler.schedule_in(EventKind::VBlank, VBLANK_INTERVAL);

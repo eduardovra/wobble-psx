@@ -88,8 +88,14 @@ bool Bus::read_io(u32 phys, u32& value)
         value = gpu.status();
         return true;
     default:
-        return false;
+        break;
     }
+
+    if (phys >= Dma::BASE && phys < Dma::END) {
+        value = dma.read_register(phys);
+        return true;
+    }
+    return false;
 }
 
 bool Bus::write_io(u32 phys, u32 value)
@@ -108,8 +114,19 @@ bool Bus::write_io(u32 phys, u32 value)
         gpu.write_gp1(value);
         return true;
     default:
-        return false;
+        break;
     }
+
+    if (phys >= Dma::BASE && phys < Dma::END) {
+        // A write to CHCR is what starts a transfer, so it happens
+        // here, inside the store instruction that asked for it.
+        const u32 channel = dma.write_register(phys, value);
+        if (channel != Dma::NO_CHANNEL) {
+            run_dma(*this, channel);
+        }
+        return true;
+    }
+    return false;
 }
 
 bool Bus::note_unhandled(u32 addr)
