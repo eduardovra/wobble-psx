@@ -24,7 +24,14 @@ struct Cpu {
     u32 current_pc = 0;
     u32 hi = 0;
     u32 lo = 0;
-    u32 sr = 0;  // COP0 r12: status register
+    u32 sr = 0;     // COP0 r12: status register
+    u32 cause = 0;  // COP0 r13: exception cause
+    u32 epc = 0;    // COP0 r14: exception return address
+
+    // whether the instruction being executed sits in a branch delay
+    // slot (an exception there must report the branch's address)
+    bool in_delay_slot = false;
+    bool branching = false;
 
     u32 load_reg = 0;
     u32 load_value = 0;
@@ -32,8 +39,16 @@ struct Cpu {
     bool halted = false;
     std::string halt_reason;
 
+    // characters the BIOS printed through its putchar kernel calls
+    std::string tty;
+
+    enum class Exception : u32 {
+        Syscall = 0x8,
+    };
+
 private:
     void execute(u32 instr);
+    void raise_exception(Exception code);
     void execute_special(u32 instr);
     void execute_cop0(u32 instr);
     void branch(u32 offset);

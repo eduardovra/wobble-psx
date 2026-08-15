@@ -19,7 +19,14 @@ constexpr u32 REGION_MASK[8] = {
 constexpr u32 BIOS_START = 0x1FC00000;
 constexpr u32 IO_START = 0x1F801000;
 constexpr u32 IO_END = 0x1F803000;
+constexpr u32 EXPANSION1_START = 0x1F000000;
+constexpr u32 EXPANSION1_END = 0x1F080000;
 constexpr u32 CACHE_CONTROL = 0xFFFE0130;
+
+bool in_expansion1(u32 phys)
+{
+    return phys >= EXPANSION1_START && phys < EXPANSION1_END;
+}
 
 u32 to_physical(u32 addr)
 {
@@ -95,6 +102,9 @@ u8 Bus::read8(u32 addr) const
     }
     if (phys >= IO_START && phys < IO_END) {
         return 0;
+    }
+    if (in_expansion1(phys)) {
+        return 0xFF;  // no expansion device present
     }
     SDL_Log("bus: unhandled read8 at %08X", addr);
     return 0;

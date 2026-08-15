@@ -46,6 +46,10 @@ void draw_cpu_window(Cpu& cpu, bool& emu_running)
     }
 
     ImGui::Text("pc %08X  hi %08X  lo %08X", cpu.pc, cpu.hi, cpu.lo);
+    ImGui::Text("sr %08X  cause %08X  epc %08X",
+                cpu.sr,
+                cpu.cause,
+                cpu.epc);
     ImGui::Separator();
     for (int i = 0; i < 32; i++) {
         if (i % 4 != 0) {
@@ -55,6 +59,30 @@ void draw_cpu_window(Cpu& cpu, bool& emu_running)
     }
 
     ImGui::End();
+}
+
+void draw_tty_window(const Cpu& cpu)
+{
+    ImGui::Begin("TTY");
+    ImGui::TextUnformatted(cpu.tty.c_str());
+    if (ImGui::GetScrollY() >= ImGui::GetScrollMaxY()) {
+        ImGui::SetScrollHereY(1.0f);
+    }
+    ImGui::End();
+}
+
+void log_new_tty_lines(const Cpu& cpu, size_t& logged_upto)
+{
+    while (true) {
+        const size_t newline = cpu.tty.find('\n', logged_upto);
+        if (newline == std::string::npos) {
+            return;
+        }
+        const auto line = cpu.tty.substr(logged_upto,
+                                         newline - logged_upto);
+        SDL_Log("tty: %s", line.c_str());
+        logged_upto = newline + 1;
+    }
 }
 
 }  // namespace
@@ -100,6 +128,7 @@ int main(int argc, char** argv)
 
     bool emu_running = true;
     bool was_halted = false;
+    size_t tty_logged_upto = 0;
     bool running = true;
     while (running) {
         SDL_Event event;
@@ -122,12 +151,14 @@ int main(int argc, char** argv)
             SDL_Log("cpu halted: %s", cpu.halt_reason.c_str());
         }
         was_halted = cpu.halted;
+        log_new_tty_lines(cpu, tty_logged_upto);
 
         ImGui_ImplSDLRenderer3_NewFrame();
         ImGui_ImplSDL3_NewFrame();
         ImGui::NewFrame();
 
         draw_cpu_window(cpu, emu_running);
+        draw_tty_window(cpu);
 
         ImGui::Render();
         SDL_SetRenderDrawColor(renderer, 30, 30, 30, 255);
