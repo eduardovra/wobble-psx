@@ -191,6 +191,7 @@ constexpr const char* HELP =
     "trace [n]          the last n instructions retired\n"
     "tracing <on|off>   record the instruction trace\n"
     "profile <n> [top]  run n instructions, then the busiest addresses\n"
+    "screen <file>      write what the display shows, as a PPM\n"
     "save <file>        write a save state\n"
     "load <file>        restore one\n"
     "reset              power-cycle the machine\n"
@@ -198,6 +199,39 @@ constexpr const char* HELP =
     "quit\n"
     "\n"
     "Numbers are hex; prefix with # for decimal.\n";
+
+// Writes what the display is showing as a binary PPM: a three-line
+// header and then the pixels, three bytes each. It is the plainest
+// image format there is, which is the point — a picture of the machine
+// should not need a library to produce or anything unusual to open.
+std::string write_screen(const Gpu& gpu, const std::string& path)
+{
+    const u32 width = gpu.display_width();
+    const u32 height = gpu.display_height();
+
+    std::ofstream file(path, std::ios::binary);
+    if (!file) {
+        return "could not open that file\n";
+    }
+    file << "P6\n" << width << " " << height << "\n255\n";
+
+    std::string pixels;
+    pixels.reserve(std::size_t{width} * height * 3);
+    for (u32 y = 0; y < height; y++) {
+        for (u32 x = 0; x < width; x++) {
+            const Gpu::Colour colour = gpu.display_pixel(x, y);
+            pixels += static_cast<char>(colour.r);
+            pixels += static_cast<char>(colour.g);
+            pixels += static_cast<char>(colour.b);
+        }
+    }
+    file.write(pixels.data(), static_cast<std::streamsize>(pixels.size()));
+
+    return std::format("wrote {}x{}{}\n",
+                       width,
+                       height,
+                       gpu.display_disabled ? " (display is blanked)" : "");
+}
 
 }  // namespace
 
@@ -577,6 +611,13 @@ std::string Debugger::execute(Console& console, const std::string& line)
             return "not a save state this build can read\n";
         }
         return where(console) + "\n";
+    }
+
+    if (command == "screen") {
+        if (words.size() < 2) {
+            return "screen needs a filename\n";
+        }
+        return write_screen(console.bus.gpu, words[1]);
     }
 
     if (command == "tty") {

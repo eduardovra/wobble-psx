@@ -12,9 +12,20 @@ from `build-essential libx11-dev libxext-dev libwayland-dev
 libxkbcommon-dev libgl1-mesa-dev`.
 
 ```sh
-cmake -B build -G Ninja -DCMAKE_BUILD_TYPE=Debug
+cmake -B build-rel -G Ninja -DCMAKE_BUILD_TYPE=Release
+cmake --build build-rel
+./build-rel/wobble SCPH1001.BIN
+```
+
+Run the emulator from a Release build. A Debug build turns on the
+address and undefined-behaviour sanitisers, which is what you want for
+the tests and is about **46 times slower** — 5.4 seconds of console
+time takes 1 second in Release and 47 in Debug, so the window runs at a
+tenth of real speed there rather than at the display's rate.
+
+```sh
+cmake -B build -G Ninja -DCMAKE_BUILD_TYPE=Debug   # for the tests
 cmake --build build
-./build/wobble
 ```
 
 ## The debugger
@@ -33,24 +44,23 @@ written against the emulator.
 `help` lists the commands. Briefly: `run`/`runc`/`frames`/`until` move
 the machine, `break` and `watch` stop it, `regs`/`mem`/`disas`/`dev`
 look at it, `trace` shows the last instructions retired, `profile`
-reports where the time and the memory accesses went, and `save`/`load`
-take snapshots. Numbers are hex unless prefixed with `#`.
+reports where the time and the memory accesses went, `screen` writes
+what the display is showing as a PPM, and `save`/`load` take snapshots.
+Numbers are hex unless prefixed with `#`.
+
+So the picture the machine is producing can be had without a window:
+
+```sh
+./build-rel/wobble-dbg SCPH1001.BIN -c "frames #320" -c "screen boot.ppm"
+```
 
 Nothing the debugger does changes what the machine does — a test
 asserts that a traced, watched, profiled run reaches the same state as
 a plain one, since everything else here depends on it.
 
-Anything that has to reach the BIOS wants a second, optimised build.
-Getting past the kernel's startup takes tens of millions of
-instructions, which the sanitisers turn from seconds into minutes:
-
-```sh
-cmake -B build-rel -G Ninja -DCMAKE_BUILD_TYPE=Release
-cmake --build build-rel --target wobble-dbg
-./build-rel/wobble-dbg SCPH1001.BIN -c "frames #150" -c "regs"
-```
-
-Keep the Debug build for the tests, where the sanitisers are the point.
+The Release build matters here too, and for the same reason: getting
+past the kernel's startup takes tens of millions of instructions, which
+the sanitisers turn from seconds into minutes.
 
 ## Tests
 

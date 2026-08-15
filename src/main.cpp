@@ -3,6 +3,7 @@
 // just a Bus (memory and devices) with a Cpu attached to it.
 
 #include <algorithm>
+#include <vector>
 
 #include <SDL3/SDL.h>
 #include <imgui.h>
@@ -11,6 +12,7 @@
 
 #include "console.h"
 #include "disasm.h"
+#include "gpu.h"
 
 namespace {
 
@@ -19,12 +21,137 @@ namespace {
 // keeps the emulator at roughly real speed.
 constexpr u64 CYCLES_PER_HOST_FRAME = CPU_CLOCK_HZ / 60;
 
+// The console's picture on its way to the window. The texture is made
+// once at the largest size any display mode reaches, and only the part
+// the current mode uses is ever uploaded — so a mode change costs
+// nothing and needs no reallocation.
+struct Display {
+    SDL_Texture* texture = nullptr;
+    std::vector<u32> pixels;
+
+    bool create(SDL_Renderer* renderer)
+    {
+        texture = SDL_CreateTexture(renderer,
+                                    SDL_PIXELFORMAT_XRGB8888,
+                                    SDL_TEXTUREACCESS_STREAMING,
+                                    MAX_WIDTH,
+                                    MAX_HEIGHT);
+        if (texture == nullptr) {
+            return false;
+        }
+        // The console's pixels are square-ish and few, and smoothing
+        // them is not what they looked like.
+        SDL_SetTextureScaleMode(texture, SDL_SCALEMODE_NEAREST);
+        pixels.resize(std::size_t{MAX_WIDTH} * MAX_HEIGHT);
+        return true;
+    }
+
+    static constexpr int MAX_WIDTH = 640;
+    static constexpr int MAX_HEIGHT = 480;
+};
+
+// The debugger lives in a strip down the left and the picture gets
+// everything to the right of it. The panels are pinned there rather
+// than left floating, because a panel that can be dragged over the
+// machine's output eventually is — and this build of ImGui has no
+// docking to arrange them with instead.
+float sidebar_width(float window_width)
+{
+    return std::clamp(window_width * 0.3f, 320.0f, 460.0f);
+}
+
+constexpr ImGuiWindowFlags PANEL_FLAGS = ImGuiWindowFlags_NoMove |
+    ImGuiWindowFlags_NoResize | ImGuiWindowFlags_NoCollapse;
+
+// ImGui measures in logical points and the renderer in pixels, and on
+// a high-density display those are not the same number, so the strip's
+// width is converted rather than assumed.
+SDL_FRect picture_region(SDL_Renderer* renderer, float sidebar)
+{
+    int output_width = 0;
+    int output_height = 0;
+    SDL_GetCurrentRenderOutputSize(renderer, &output_width, &output_height);
+
+    const float logical = ImGui::GetIO().DisplaySize.x;
+    float scale = 1.0f;
+    if (logical > 0) {
+        scale = static_cast<float>(output_width) / logical;
+    }
+    const float left = sidebar * scale;
+    return {left,
+            0,
+            static_cast<float>(output_width) - left,
+            static_cast<float>(output_height)};
+}
+
+// Every display mode was shown at 4:3 whatever its pixel count — 256
+// across and 640 across filled the same television — so the picture is
+// fitted to that shape rather than to its own dimensions, and centred
+// in whatever room is left over.
+SDL_FRect fit_into(const SDL_FRect& region)
+{
+    constexpr float ASPECT = 4.0f / 3.0f;
+    float width = region.w;
+    float height = width / ASPECT;
+    if (height > region.h) {
+        height = region.h;
+        width = height * ASPECT;
+    }
+    return {region.x + (region.w - width) / 2,
+            region.y + (region.h - height) / 2,
+            width,
+            height};
+}
+
+void present_display(SDL_Renderer* renderer,
+                     Display& display,
+                     const Gpu& gpu,
+                     const SDL_FRect& region)
+{
+    const SDL_FRect area = fit_into(region);
+
+    // A blanked GPU puts out no picture at all, which is a black
+    // screen rather than the last thing that was drawn.
+    if (gpu.display_disabled) {
+        SDL_SetRenderDrawColor(renderer, 0, 0, 0, 255);
+        SDL_RenderFillRect(renderer, &area);
+        return;
+    }
+
+    const int width = std::min<int>(static_cast<int>(gpu.display_width()),
+                                    Display::MAX_WIDTH);
+    const int height = std::min<int>(static_cast<int>(gpu.display_height()),
+                                     Display::MAX_HEIGHT);
+
+    for (int y = 0; y < height; y++) {
+        for (int x = 0; x < width; x++) {
+            const Gpu::Colour colour =
+                gpu.display_pixel(static_cast<u32>(x), static_cast<u32>(y));
+            display.pixels[std::size_t{static_cast<u32>(y)} * width + x] =
+                (u32{colour.r} << 16) | (u32{colour.g} << 8) | colour.b;
+        }
+    }
+
+    const SDL_Rect uploaded = {0, 0, width, height};
+    SDL_UpdateTexture(display.texture,
+                      &uploaded,
+                      display.pixels.data(),
+                      width * static_cast<int>(sizeof(u32)));
+
+    const SDL_FRect source = {
+        0, 0, static_cast<float>(width), static_cast<float>(height)};
+    SDL_RenderTexture(renderer, display.texture, &source, &area);
+}
+
 // Debugger panel: run/pause/step controls and the full register file.
-void draw_cpu_window(Console& console, bool& emu_running)
+void draw_cpu_window(Console& console, bool& emu_running, float sidebar)
 {
     Cpu& cpu = console.cpu;
 
-    ImGui::Begin("CPU");
+    const float height = ImGui::GetIO().DisplaySize.y * 0.6f;
+    ImGui::SetNextWindowPos(ImVec2(0, 0));
+    ImGui::SetNextWindowSize(ImVec2(sidebar, height));
+    ImGui::Begin("CPU", nullptr, PANEL_FLAGS);
 
     if (cpu.halted) {
         emu_running = false;
@@ -64,8 +191,11 @@ void draw_cpu_window(Console& console, bool& emu_running)
                 console.bus.irq.mask,
                 console.bus.gpu.scanline);
     ImGui::Separator();
+    // Two to a row rather than four: the strip is narrower than the
+    // window used to be, and a register that wraps is worse than one
+    // more row of them.
     for (int i = 0; i < 32; i++) {
-        if (i % 4 != 0) {
+        if (i % 2 != 0) {
             ImGui::SameLine();
         }
         ImGui::Text("%-4s %08X ", REG_NAMES[i], cpu.regs[i]);
@@ -76,9 +206,13 @@ void draw_cpu_window(Console& console, bool& emu_running)
 
 // What the BIOS has printed, captured by the CPU's putchar hook.
 // It is the main sign of life before there is a GPU to draw with.
-void draw_tty_window(const Cpu& cpu)
+void draw_tty_window(const Cpu& cpu, float sidebar)
 {
-    ImGui::Begin("TTY");
+    const float top = ImGui::GetIO().DisplaySize.y * 0.6f;
+    ImGui::SetNextWindowPos(ImVec2(0, top));
+    ImGui::SetNextWindowSize(
+        ImVec2(sidebar, ImGui::GetIO().DisplaySize.y - top));
+    ImGui::Begin("TTY", nullptr, PANEL_FLAGS);
     ImGui::TextUnformatted(cpu.tty.c_str());
     if (ImGui::GetScrollY() >= ImGui::GetScrollMaxY()) {
         ImGui::SetScrollHereY(1.0f);
@@ -135,6 +269,12 @@ int main(int argc, char** argv)
     }
     SDL_SetRenderVSync(renderer, 1);
 
+    Display display;
+    if (!display.create(renderer)) {
+        SDL_Log("could not create the display texture: %s", SDL_GetError());
+        return 1;
+    }
+
     IMGUI_CHECKVERSION();
     ImGui::CreateContext();
     ImGui::StyleColorsDark();
@@ -167,16 +307,20 @@ int main(int argc, char** argv)
         ImGui_ImplSDL3_NewFrame();
         ImGui::NewFrame();
 
-        draw_cpu_window(console, emu_running);
-        draw_tty_window(console.cpu);
+        const float sidebar = sidebar_width(ImGui::GetIO().DisplaySize.x);
+        draw_cpu_window(console, emu_running, sidebar);
+        draw_tty_window(console.cpu, sidebar);
+        const SDL_FRect region = picture_region(renderer, sidebar);
 
         ImGui::Render();
         SDL_SetRenderDrawColor(renderer, 30, 30, 30, 255);
         SDL_RenderClear(renderer);
+        present_display(renderer, display, console.bus.gpu, region);
         ImGui_ImplSDLRenderer3_RenderDrawData(ImGui::GetDrawData(), renderer);
         SDL_RenderPresent(renderer);
     }
 
+    SDL_DestroyTexture(display.texture);
     ImGui_ImplSDLRenderer3_Shutdown();
     ImGui_ImplSDL3_Shutdown();
     ImGui::DestroyContext();
