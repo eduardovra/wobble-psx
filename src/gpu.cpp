@@ -2,6 +2,8 @@
 
 #include <cstddef>
 
+#include "savestate.h"
+
 namespace {
 
 // The word that ends a polyline. Software terminates the vertex list
@@ -66,6 +68,35 @@ u32 gp0_length(u32 command)
     default:  // E0h..FFh, drawing settings, one word each
         return 1;
     }
+}
+
+void Gpu::visit_state(State& state)
+{
+    state(vram);
+    state(mode);
+    state(transfer.x);
+    state(transfer.y);
+    state(transfer.width);
+    state(transfer.height);
+    state(transfer.pixels_done);
+    state(draw_mode);
+    state(texture_window);
+    state(draw_area_top);
+    state(draw_area_bottom);
+    state(draw_offset);
+    state(mask_setting);
+    state(display_mode);
+    state(display_start);
+    state(display_range_x);
+    state(display_range_y);
+    state(dma_direction);
+    state(display_disabled);
+    state(irq);
+    state(scanline);
+    state(odd_field);
+    state(gpuread_latch);
+    state(command);
+    state(command_words);
 }
 
 void Gpu::reset()

@@ -4,6 +4,7 @@
 
 #include "bus.h"
 #include "log.h"
+#include "savestate.h"
 
 namespace {
 
@@ -82,6 +83,17 @@ bool Dma::Channel::started() const
 }
 
 void Dma::Channel::finish() { control &= ~(CHCR_ENABLE | CHCR_TRIGGER); }
+
+void Dma::visit_state(State& state)
+{
+    for (Channel& channel : channels) {
+        state(channel.base);
+        state(channel.block);
+        state(channel.control);
+    }
+    state(control);
+    state(interrupt);
+}
 
 void Dma::reset()
 {

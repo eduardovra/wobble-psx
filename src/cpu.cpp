@@ -3,6 +3,8 @@
 #include <format>
 #include <utility>
 
+#include "savestate.h"
+
 namespace {
 
 // Execution starts in the BIOS ROM, at the top of the uncached KSEG1
@@ -81,6 +83,28 @@ u32 imm_se(u32 instr)
 }
 
 }  // namespace
+
+void Cpu::visit_state(State& state)
+{
+    state(regs);
+    state(out_regs);
+    state(pc);
+    state(next_pc);
+    state(current_pc);
+    state(hi);
+    state(lo);
+    state(bad_vaddr);
+    state(sr);
+    state(epc);
+    state(cause);
+    state(in_delay_slot);
+    state(branching);
+    state(load_reg);
+    state(load_value);
+    state(halted);
+    state(halt_reason);
+    state(tty);
+}
 
 void Cpu::reset()
 {

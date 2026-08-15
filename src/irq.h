@@ -2,6 +2,8 @@
 
 #include "types.h"
 
+struct State;
+
 // The devices that can interrupt the CPU, numbered by the bit each one
 // owns in the controller's two registers. The order is the hardware's,
 // and it doubles as the priority order the BIOS handler scans in.
@@ -41,6 +43,8 @@ struct Irq {
     static constexpr u32 MASK = 0x1F801074;
 
     void reset();
+
+    void visit_state(State& state);
 
     // Called by a device when it fires. The line latches: it stays
     // pending until software acknowledges it, whether or not it is

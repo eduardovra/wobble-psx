@@ -5,6 +5,7 @@
 #include "types.h"
 
 struct Bus;
+struct State;
 
 // The DMA controller: seven channels that move words between RAM and a
 // device without the CPU copying them one at a time.
@@ -79,6 +80,8 @@ struct Dma {
     };
 
     void reset();
+
+    void visit_state(State& state);
 
     u32 read_register(u32 phys) const;
 

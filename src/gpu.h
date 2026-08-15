@@ -5,6 +5,8 @@
 
 #include "types.h"
 
+struct State;
+
 // The GPU, as far as the CPU can see it: two ports, and the state
 // behind them.
 //
@@ -54,6 +56,8 @@ struct Gpu {
     static constexpr u32 VISIBLE_SCANLINES = 240;
 
     void reset();
+
+    void visit_state(State& state);
 
     // Advances the video signal by one scanline, and reports whether
     // vertical blanking has just begun — the moment everything else in

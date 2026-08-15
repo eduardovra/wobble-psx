@@ -6,6 +6,8 @@
 #include "bus.h"
 #include "types.h"
 
+struct State;
+
 // The PlayStation's main CPU: a 33.87 MHz MIPS R3000A, 32-bit, with
 // 32 general-purpose registers and no MMU. Everything it can reach —
 // RAM, BIOS ROM, hardware registers — goes through the Bus.
@@ -35,6 +37,8 @@ struct Cpu {
     // the master clock forward. Does nothing, and costs nothing, once
     // halted.
     u32 step();
+
+    void visit_state(State& state);
 
     // Cause as software sees it, with the interrupt controller's line
     // merged into bit IP2. That bit is deliberately not stored: on

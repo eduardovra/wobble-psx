@@ -1,5 +1,7 @@
 #include "irq.h"
 
+#include "savestate.h"
+
 void Irq::reset()
 {
     status = 0;
@@ -12,3 +14,9 @@ void Irq::raise(Interrupt line)
 }
 
 void Irq::acknowledge(u16 value) { status &= value; }
+
+void Irq::visit_state(State& state)
+{
+    state(status);
+    state(mask);
+}

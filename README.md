@@ -17,6 +17,29 @@ cmake --build build
 ./build/wobble
 ```
 
+## The debugger
+
+`wobble-dbg` is the same emulated console with no display attached and
+a debugger on the front. Commands are text in and text out, so a
+question about the machine is a line of input rather than a program
+written against the emulator.
+
+```sh
+./build/wobble-dbg SCPH1001.BIN -c "until BFC00150 #5000" -c "regs"
+./build/wobble-dbg SCPH1001.BIN session.txt      # a script
+./build/wobble-dbg SCPH1001.BIN                  # or interactively
+```
+
+`help` lists the commands. Briefly: `run`/`runc`/`frames`/`until` move
+the machine, `break` and `watch` stop it, `regs`/`mem`/`disas`/`dev`
+look at it, `trace` shows the last instructions retired, `profile`
+reports where the time and the memory accesses went, and `save`/`load`
+take snapshots. Numbers are hex unless prefixed with `#`.
+
+Nothing the debugger does changes what the machine does — a test
+asserts that a traced, watched, profiled run reaches the same state as
+a plain one, since everything else here depends on it.
+
 ## Tests
 
 ```sh

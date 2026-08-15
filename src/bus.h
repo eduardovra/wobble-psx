@@ -9,6 +9,9 @@
 #include "irq.h"
 #include "types.h"
 
+struct Debugger;
+struct State;
+
 // Everything the CPU can address. There is no MMU on the R3000A: an
 // address is decoded straight to a device by its numeric range, which
 // makes this the map of the whole machine.
@@ -28,6 +31,8 @@ struct Bus {
 
     // Reads the whole 512 KB image; false if it is missing or short.
     bool load_bios(const std::string& path);
+
+    void visit_state(State& state);
 
     // Reads and writes take virtual addresses, as the CPU sees them.
     //
@@ -74,4 +79,11 @@ struct Bus {
     // Bounded by the number of distinct unhandled addresses a game
     // actually touches, which is small.
     std::unordered_set<u32> reported_addresses;
+
+    // Set while a debugger wants to see memory accesses, and null the
+    // rest of the time. A null check on the access paths is a branch
+    // the predictor gets right every time, so the cost when nothing is
+    // attached is nil — which matters, because this sits in the
+    // hottest code the emulator has.
+    Debugger* debug = nullptr;
 };

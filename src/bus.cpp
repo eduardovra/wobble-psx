@@ -5,7 +5,9 @@
 #include <fstream>
 #include <utility>
 
+#include "debugger.h"
 #include "log.h"
+#include "savestate.h"
 
 namespace {
 
@@ -71,6 +73,19 @@ void write_to(std::array<u8, N>& mem, u32 offset, T value)
 }
 
 }  // namespace
+
+void Bus::visit_state(State& state)
+{
+    // The BIOS image is not saved: it is read-only and comes from the
+    // same file either way, so a state carries only what the machine
+    // could have changed. reported_addresses is left out for the same
+    // reason in reverse — it is the emulator's own bookkeeping, not
+    // anything the console has.
+    state(ram);
+    irq.visit_state(state);
+    gpu.visit_state(state);
+    dma.visit_state(state);
+}
 
 bool Bus::read_io(u32 phys, u32& value)
 {
@@ -147,6 +162,9 @@ bool Bus::load_bios(const std::string& path)
 
 u32 Bus::read32(u32 addr)
 {
+    if (debug != nullptr) {
+        debug->note_access(addr, 4, false);
+    }
     const u32 phys = to_physical(addr);
     if (phys < RAM_SIZE) {
         return read_from<u32>(ram, phys);
@@ -167,6 +185,9 @@ u32 Bus::read32(u32 addr)
 
 u16 Bus::read16(u32 addr)
 {
+    if (debug != nullptr) {
+        debug->note_access(addr, 2, false);
+    }
     const u32 phys = to_physical(addr);
     if (phys < RAM_SIZE) {
         return read_from<u16>(ram, phys);
@@ -187,6 +208,9 @@ u16 Bus::read16(u32 addr)
 
 u8 Bus::read8(u32 addr)
 {
+    if (debug != nullptr) {
+        debug->note_access(addr, 1, false);
+    }
     const u32 phys = to_physical(addr);
     if (phys < RAM_SIZE) {
         return ram[phys];
@@ -210,6 +234,9 @@ u8 Bus::read8(u32 addr)
 
 void Bus::write32(u32 addr, u32 value)
 {
+    if (debug != nullptr) {
+        debug->note_access(addr, 4, true);
+    }
     const u32 phys = to_physical(addr);
     if (phys < RAM_SIZE) {
         write_to(ram, phys, value);
@@ -230,6 +257,9 @@ void Bus::write32(u32 addr, u32 value)
 
 void Bus::write16(u32 addr, u16 value)
 {
+    if (debug != nullptr) {
+        debug->note_access(addr, 2, true);
+    }
     const u32 phys = to_physical(addr);
     if (phys < RAM_SIZE) {
         write_to(ram, phys, value);
@@ -247,6 +277,9 @@ void Bus::write16(u32 addr, u16 value)
 
 void Bus::write8(u32 addr, u8 value)
 {
+    if (debug != nullptr) {
+        debug->note_access(addr, 1, true);
+    }
     const u32 phys = to_physical(addr);
     if (phys < RAM_SIZE) {
         ram[phys] = value;

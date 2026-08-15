@@ -6,6 +6,8 @@
 
 #include "types.h"
 
+struct State;
+
 // The master clock everything on the console is timed against:
 // 33.8688 MHz, which is 44100 * 768 — every clock in the machine is
 // derived from the audio sample rate.
@@ -47,6 +49,8 @@ struct Scheduler {
     Scheduler() { reset(); }
 
     void reset();
+
+    void visit_state(State& state);
 
     // Advances the master clock. The CPU is the only thing that
     // should call this; everything else is scheduled against it.

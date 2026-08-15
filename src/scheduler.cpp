@@ -2,6 +2,8 @@
 
 #include <algorithm>
 
+#include "savestate.h"
+
 void Scheduler::reset()
 {
     now = 0;
@@ -53,4 +55,10 @@ std::optional<DueEvent> Scheduler::next_due()
     const u64 deadline = deadlines[due];
     deadlines[due] = NEVER;
     return DueEvent{.kind = static_cast<EventKind>(due), .deadline = deadline};
+}
+
+void Scheduler::visit_state(State& state)
+{
+    state(now);
+    state(deadlines);
 }

@@ -49,11 +49,15 @@ target_link_libraries(imgui PUBLIC SDL3::SDL3)
 # library, so the tests can link it without a window system.
 add_library(core STATIC
     src/bus.cpp
+    src/console.cpp
     src/cpu.cpp
+    src/debugger.cpp
+    src/disasm.cpp
     src/dma.cpp
     src/gpu.cpp
     src/irq.cpp
     src/log.cpp
+    src/savestate.cpp
     src/scheduler.cpp
 )
 target_include_directories(core PUBLIC src)
@@ -61,10 +65,17 @@ target_include_directories(core PUBLIC src)
 add_executable(wobble src/main.cpp)
 target_link_libraries(wobble PRIVATE core imgui SDL3::SDL3)
 
+# The same console with a debugger on the front and no display, so it
+# runs anywhere a terminal does.
+add_executable(wobble-dbg src/wobble-dbg.cpp)
+target_link_libraries(wobble-dbg PRIVATE core)
+
 add_executable(tests
     tests/main.cpp
     tests/test_bus.cpp
     tests/test_cpu.cpp
+    tests/test_debugger.cpp
+    tests/test_disasm.cpp
     tests/test_dma.cpp
     tests/test_gpu.cpp
     tests/test_irq.cpp
@@ -72,7 +83,7 @@ add_executable(tests
 )
 target_link_libraries(tests PRIVATE core doctest::doctest)
 
-foreach(target core wobble tests)
+foreach(target core wobble wobble-dbg tests)
     target_compile_options(${target} PRIVATE -Wall -Wextra)
     if(CMAKE_BUILD_TYPE STREQUAL "Debug")
         target_compile_options(${target} PRIVATE
