@@ -1,0 +1,55 @@
+# Chosen to match the code that was already here rather than to impose
+# a new house style: of the stock styles, WebKit was closest, and these
+# options close the remaining gap.
+BasedOnStyle: WebKit
+
+ColumnLimit: 80
+IndentWidth: 4
+PointerAlignment: Left
+SpacesBeforeTrailingComments: 2
+SpaceBeforeCpp11BracedList: false
+Cpp11BracedListStyle: true
+BreakBeforeBinaryOperators: None
+AllowShortFunctionsOnASingleLine: All
+PackConstructorInitializers: CurrentLine
+BreakConstructorInitializers: AfterColon
+AlignAfterOpenBracket: Align
+AlignTrailingComments:
+  Kind: Always
+  OverEmptyLines: 0
+
+# Once a call or signature has to wrap, every argument gets its own
+# line rather than being packed several to a line.
+BinPackArguments: false
+BinPackParameters: false
+
+# Braces open on their own line for functions, and on the same line for
+# everything else.
+BreakBeforeBraces: Custom
+BraceWrapping:
+  AfterFunction: true
+  AfterNamespace: false
+  AfterClass: false
+  AfterStruct: false
+  AfterEnum: false
+  AfterUnion: false
+  AfterControlStatement: Never
+  BeforeElse: false
+  BeforeCatch: false
+  IndentBraces: false
+  SplitEmptyFunction: false
+
+# Include ordering, which is the thing hardest to keep straight by
+# hand. A .cpp's own header comes first so it is proven to compile
+# standalone, then the standard library, then this project's headers.
+SortIncludes: CaseSensitive
+IncludeBlocks: Regroup
+IncludeCategories:
+  # Standard library: lowercase, no dot or slash — <format>, <array>.
+  - Regex: '^<[a-z_]+>$'
+    Priority: 2
+  # Third party: <SDL3/SDL.h>, <imgui.h>, <doctest/doctest.h>.
+  - Regex: '^<.*>$'
+    Priority: 3
+  - Regex: '^"'
+    Priority: 4

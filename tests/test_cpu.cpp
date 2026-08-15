@@ -1,0 +1,219 @@
+#include <doctest/doctest.h>
+
+#include "machine.h"
+
+using namespace mips;
+
+TEST_CASE("a load's value is not visible to the next instruction")
+{
+    Machine m;
+    m.bus->write32(Machine::DATA, 0xDEADBEEF);
+    m.load({
+        addiu(t1, zero, Machine::DATA),
+        lw(t0, t1, 0),
+        addu(t2, t0, zero),  // load delay slot: still sees the old t0
+        addu(t3, t0, zero),  // the loaded value has landed by now
+    });
+    m.run(4);
+
+    CHECK(m.reg(t2) == 0);
+    CHECK(m.reg(t3) == 0xDEADBEEF);
+}
+
+TEST_CASE("consecutive loads into one register each land in turn")
+{
+    Machine m;
+    m.bus->write32(Machine::DATA, 0x11111111);
+    m.bus->write32(Machine::DATA + 4, 0x22222222);
+    m.load({
+        addiu(t1, zero, Machine::DATA),
+        lw(t0, t1, 0),
+        lw(t0, t1, 4),
+        addu(t2, t0, zero),  // sees the first load
+        addu(t3, t0, zero),  // and only then the second
+    });
+    m.run(5);
+
+    CHECK(m.reg(t2) == 0x11111111);
+    CHECK(m.reg(t3) == 0x22222222);
+}
+
+TEST_CASE("a write in the load delay slot beats the load")
+{
+    Machine m;
+    m.bus->write32(Machine::DATA, 0xDEADBEEF);
+    m.load({
+        addiu(t1, zero, Machine::DATA),
+        lw(t0, t1, 0),
+        addiu(t0, zero, 5),  // same register, one instruction later
+        addu(t2, t0, zero),
+    });
+    m.run(4);
+
+    CHECK(m.reg(t0) == 5);
+    CHECK(m.reg(t2) == 5);
+}
+
+TEST_CASE("the branch delay slot runs and the branch still takes")
+{
+    Machine m;
+    m.load({
+        addiu(t0, zero, 1),
+        beq(zero, zero, 2),
+        addiu(t1, zero, 1),  // delay slot: runs even though we branch
+        addiu(t2, zero, 1),  // jumped over
+        addiu(t3, zero, 1),  // branch target
+    });
+    m.run(4);
+
+    CHECK(m.reg(t0) == 1);
+    CHECK(m.reg(t1) == 1);
+    CHECK(m.reg(t2) == 0);
+    CHECK(m.reg(t3) == 1);
+}
+
+TEST_CASE("JAL links past the delay slot")
+{
+    const u32 target = Machine::CODE + 0x40;
+    Machine m;
+    m.load({jal(target), nop()});
+    m.run(2);
+
+    CHECK(m.reg(ra) == Machine::CODE + 8);
+    CHECK(m.cpu.pc == target);
+}
+
+TEST_CASE("an exception in a delay slot reports the branch")
+{
+    Machine m;
+    m.load({beq(zero, zero, 2), syscall_op()});
+    m.run(2);
+
+    CHECK(m.exc_code() == 8);
+    CHECK(m.cpu.epc == Machine::CODE);  // the branch, not the slot
+    CHECK(m.in_branch_delay());
+}
+
+TEST_CASE("a later exception clears the branch delay flag")
+{
+    Machine m;
+    m.load({beq(zero, zero, 2), syscall_op()});
+    m.run(2);
+    REQUIRE(m.in_branch_delay());
+
+    m.load({syscall_op()});
+    m.run(1);
+
+    CHECK(m.exc_code() == 8);
+    CHECK_FALSE(m.in_branch_delay());
+}
+
+TEST_CASE("an exception keeps the pending interrupt bits in Cause")
+{
+    Machine m;
+    m.cpu.cause = 1u << 10;  // IP2, as the interrupt controller sets it
+    m.load({syscall_op()});
+    m.run(1);
+
+    CHECK(m.exc_code() == 8);
+    CHECK((m.cpu.cause & (1u << 10)) != 0);
+}
+
+TEST_CASE("an exception pushes the mode stack and RFE pops it")
+{
+    Machine m;
+    m.cpu.sr = 0b000011;  // current level: interrupts on, user mode
+    m.load({syscall_op()});
+    m.run(1);
+    CHECK((m.cpu.sr & 0x3F) == 0b001100);  // pushed, kernel with IRQs off
+
+    m.load({rfe()});
+    m.run(1);
+    CHECK((m.cpu.sr & 0x3F) == 0b000011);
+}
+
+TEST_CASE("an unaligned load raises AdEL with the address in BadVaddr")
+{
+    Machine m;
+    m.load({addiu(t1, zero, Machine::DATA + 2), lw(t0, t1, 0)});
+    m.run(2);
+
+    CHECK(m.exc_code() == 4);
+    CHECK(m.cpu.bad_vaddr == Machine::DATA + 2);
+    CHECK_FALSE(m.cpu.halted);
+}
+
+TEST_CASE("an unaligned store raises AdES")
+{
+    Machine m;
+    m.load({addiu(t1, zero, Machine::DATA + 1), sw(t0, t1, 0)});
+    m.run(2);
+
+    CHECK(m.exc_code() == 5);
+    CHECK(m.cpu.bad_vaddr == Machine::DATA + 1);
+    CHECK_FALSE(m.cpu.halted);
+}
+
+TEST_CASE("signed overflow traps and leaves the destination alone")
+{
+    Machine m;
+    m.load({
+        lui(t0, 0x7FFF),
+        ori(t0, t0, 0xFFFF),  // t0 = INT32_MAX
+        addiu(t1, zero, 1),
+        add(t2, t0, t1),
+    });
+    m.run(4);
+
+    CHECK(m.exc_code() == 0xC);
+    CHECK(m.reg(t2) == 0);
+    CHECK_FALSE(m.cpu.halted);
+}
+
+TEST_CASE("an unmasked interrupt is taken before the instruction")
+{
+    Machine m;
+    m.cpu.sr = (1u << 10) | 1;  // Im2 set, interrupts enabled
+    m.cpu.cause = 1u << 10;     // IP2 pending
+    m.load({addiu(t0, zero, 1)});
+    m.run(1);
+
+    CHECK(m.exc_code() == 0);
+    CHECK(m.cpu.epc == Machine::CODE);
+    CHECK(m.reg(t0) == 0);  // aborted, and re-runs on return
+}
+
+TEST_CASE("an interrupt is ignored while interrupts are disabled")
+{
+    Machine m;
+    m.cpu.sr = 1u << 10;     // unmasked, but IEc clear
+    m.cpu.cause = 1u << 10;  // IP2 pending
+    m.load({addiu(t0, zero, 1)});
+    m.run(1);
+
+    CHECK(m.reg(t0) == 1);
+}
+
+TEST_CASE("an unimplemented opcode halts instead of trapping")
+{
+    Machine m;
+    m.load({0xFFFFFFFF});
+    m.run(1);
+
+    CHECK(m.cpu.halted);
+}
+
+TEST_CASE("MFC0 reads back through the load delay slot")
+{
+    Machine m;
+    m.cpu.cause = 1u << 10;
+    m.load({
+        mfc0(t0, 13),        // Cause
+        addu(t1, t0, zero),  // delay slot: t0 not updated yet
+        addu(t2, t0, zero),
+    });
+    m.run(3);
+
+    CHECK(m.reg(t1) == 0);
+    CHECK(m.reg(t2) == (1u << 10));
+}

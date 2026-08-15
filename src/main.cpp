@@ -2,12 +2,12 @@
 // the frame loop that drives the CPU. The emulated machine itself is
 // just a Bus (memory and devices) with a Cpu attached to it.
 
+#include <algorithm>
+
 #include <SDL3/SDL.h>
 #include <imgui.h>
 #include <imgui_impl_sdl3.h>
 #include <imgui_impl_sdlrenderer3.h>
-
-#include <algorithm>
 
 #include "bus.h"
 #include "cpu.h"
@@ -18,12 +18,14 @@ namespace {
 // Conventional MIPS register names, in register-number order. The
 // hardware only numbers them; the names are an ABI convention, but
 // they are what disassembly and BIOS documentation use.
+// clang-format off
 constexpr const char* REG_NAMES[32] = {
     "zero", "at", "v0", "v1", "a0", "a1", "a2", "a3",
     "t0",   "t1", "t2", "t3", "t4", "t5", "t6", "t7",
     "s0",   "s1", "s2", "s3", "s4", "s5", "s6", "s7",
     "t8",   "t9", "k0", "k1", "gp", "sp", "fp", "ra",
 };
+// clang-format on
 
 // Emulated time to run per host frame. The renderer is vsynced to
 // 60 Hz, so running one sixtieth of a second of console time per pass
@@ -71,10 +73,7 @@ void dispatch_due_events(Scheduler& scheduler, Timing& timing)
 // Runs the console for a slice of emulated time. The CPU is let loose
 // only as far as the next deadline, so a device's event lands on the
 // exact cycle it asked for rather than whenever the loop next checks.
-void run_cycles(Cpu& cpu,
-                Scheduler& scheduler,
-                Timing& timing,
-                u64 budget)
+void run_cycles(Cpu& cpu, Scheduler& scheduler, Timing& timing, u64 budget)
 {
     const u64 end = scheduler.now + budget;
     while (scheduler.now < end && !cpu.halted) {
@@ -158,8 +157,7 @@ void log_new_tty_lines(const Cpu& cpu, size_t& logged_upto)
         if (newline == std::string::npos) {
             return;
         }
-        const auto line = cpu.tty.substr(logged_upto,
-                                         newline - logged_upto);
+        const auto line = cpu.tty.substr(logged_upto, newline - logged_upto);
         SDL_Log("tty: %s", line.c_str());
         logged_upto = newline + 1;
     }
@@ -186,11 +184,11 @@ int main(int argc, char** argv)
         return 1;
     }
 
-    SDL_Window* window = SDL_CreateWindow(
-        "wobble",
-        1280,
-        720,
-        SDL_WINDOW_RESIZABLE | SDL_WINDOW_HIGH_PIXEL_DENSITY);
+    SDL_Window* window =
+        SDL_CreateWindow("wobble",
+                         1280,
+                         720,
+                         SDL_WINDOW_RESIZABLE | SDL_WINDOW_HIGH_PIXEL_DENSITY);
     if (window == nullptr) {
         SDL_Log("SDL_CreateWindow failed: %s", SDL_GetError());
         return 1;
@@ -223,10 +221,7 @@ int main(int argc, char** argv)
         }
 
         if (emu_running) {
-            run_cycles(cpu,
-                       scheduler,
-                       timing,
-                       CYCLES_PER_HOST_FRAME);
+            run_cycles(cpu, scheduler, timing, CYCLES_PER_HOST_FRAME);
         }
         if (cpu.halted && !was_halted) {
             SDL_Log("cpu halted: %s", cpu.halt_reason.c_str());
@@ -244,8 +239,7 @@ int main(int argc, char** argv)
         ImGui::Render();
         SDL_SetRenderDrawColor(renderer, 30, 30, 30, 255);
         SDL_RenderClear(renderer);
-        ImGui_ImplSDLRenderer3_RenderDrawData(
-            ImGui::GetDrawData(), renderer);
+        ImGui_ImplSDLRenderer3_RenderDrawData(ImGui::GetDrawData(), renderer);
         SDL_RenderPresent(renderer);
     }
 

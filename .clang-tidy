@@ -1,0 +1,46 @@
+# Checks aimed at finding bugs, not at enforcing a house dialect. An
+# emulator breaks a lot of general-purpose C++ advice on purpose — it
+# is full of magic constants, wide switches and public plain-data
+# structs — so the noisier style checks are off rather than routinely
+# suppressed at the call site.
+Checks: >
+  bugprone-*,
+  clang-analyzer-*,
+  performance-*,
+  portability-*,
+  misc-*,
+  modernize-*,
+  readability-*,
+  -bugprone-easily-swappable-parameters,
+  -misc-non-private-member-variables-in-classes,
+  -misc-include-cleaner,
+  -modernize-avoid-c-arrays,
+  -modernize-use-nodiscard,
+  -modernize-use-trailing-return-type,
+  -performance-enum-size,
+  -portability-avoid-pragma-once,
+  -readability-function-cognitive-complexity,
+  -readability-identifier-length,
+  -readability-implicit-bool-conversion,
+  -readability-magic-numbers,
+  -readability-uppercase-literal-suffix,
+  -readability-inconsistent-declaration-parameter-name,
+  -clang-analyzer-optin.core.EnumCastOutOfRange
+
+# Two of the disabled checks above are worth naming, since they are
+# bug checks rather than style ones:
+#
+#   readability-inconsistent-declaration-parameter-name reports at the
+#   declaration it dislikes, which for us is inside glibc's headers.
+#
+#   optin.core.EnumCastOutOfRange fires on the size_t-to-EventKind cast
+#   in Scheduler::next_due. The index is either EVENT_COUNT, which
+#   returns early, or a valid position in an array sized from the enum
+#   itself — an invariant the analyzer cannot carry through the loop.
+
+WarningsAsErrors: '*'
+# Only this project's own headers. `src` and `tests` must be whole
+# path segments and the header must sit directly inside one: the
+# fetched dependencies unpack into directories named `doctest-src`,
+# `sdl3-src` and `imgui-src`, which a looser pattern matches inside.
+HeaderFilterRegex: '(^|/)(src|tests)/[^/]+\.h$'

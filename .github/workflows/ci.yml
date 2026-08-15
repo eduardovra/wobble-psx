@@ -1,0 +1,55 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+jobs:
+  build-and-test:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      # SDL is built from source by FetchContent and needs the display
+      # headers to configure. Only the `wobble` target uses it; the
+      # tests link `core`, which has no host dependencies.
+      - name: Install SDL build dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends \
+            ninja-build libx11-dev libxext-dev libwayland-dev \
+            libxkbcommon-dev libgl1-mesa-dev
+
+      # SDL and Dear ImGui are fixed at a tag, so the sources only need
+      # fetching and building again when CMakeLists.txt changes.
+      - name: Cache fetched dependencies
+        uses: actions/cache@v4
+        with:
+          path: build/_deps
+          key: deps-${{ runner.os }}-${{ hashFiles('CMakeLists.txt') }}
+
+      - name: Configure
+        run: cmake -B build -G Ninja -DCMAKE_BUILD_TYPE=Debug
+
+      - name: Build
+        run: cmake --build build
+
+      - name: Test
+        run: ctest --test-dir build --output-on-failure
+
+      # Pinned to 18: which checks exist, and what they flag, varies
+      # between clang-tidy releases, so an unpinned runner would fail
+      # on code that lints clean locally.
+      - name: Install lint tools
+        run: sudo apt-get install -y --no-install-recommends
+          clang-format-18 clang-tidy-18
+
+      - name: Check formatting
+        run: clang-format-18 --dry-run -Werror src/*.cpp src/*.h
+          tests/*.cpp tests/*.h
+
+      # Runs after the build so compile_commands.json is present and
+      # the fetched dependencies' headers exist.
+      - name: Lint
+        run: clang-tidy-18 -p build src/*.cpp tests/*.cpp

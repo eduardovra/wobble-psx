@@ -405,9 +405,8 @@ void Cpu::execute(u32 instr)
         break;
     }
     default:
-        halt(std::format("unhandled instruction {:08X} at {:08X}",
-                         instr,
-                         current_pc));
+        halt(std::format(
+            "unhandled instruction {:08X} at {:08X}", instr, current_pc));
         break;
     }
 }
@@ -558,9 +557,8 @@ void Cpu::execute_special(u32 instr)
         set_reg(rd(instr), reg(rs(instr)) < reg(rt(instr)) ? 1 : 0);
         break;
     default:
-        halt(std::format("unhandled SPECIAL {:08X} at {:08X}",
-                         instr,
-                         current_pc));
+        halt(std::format(
+            "unhandled SPECIAL {:08X} at {:08X}", instr, current_pc));
         break;
     }
 }
@@ -592,9 +590,7 @@ void Cpu::execute_cop0(u32 instr)
             schedule_load(rt(instr), epc);
             break;
         default:
-            halt(std::format("MFC0 cop0_r{} at {:08X}",
-                             rd(instr),
-                             current_pc));
+            halt(std::format("MFC0 cop0_r{} at {:08X}", rd(instr), current_pc));
             break;
         }
         break;
@@ -606,9 +602,8 @@ void Cpu::execute_cop0(u32 instr)
         default:
             // breakpoint registers etc. — the BIOS zeroes them
             if (reg(rt(instr)) != 0) {
-                halt(std::format("MTC0 cop0_r{} at {:08X}",
-                                 rd(instr),
-                                 current_pc));
+                halt(std::format(
+                    "MTC0 cop0_r{} at {:08X}", rd(instr), current_pc));
             }
             break;
         }
@@ -618,17 +613,14 @@ void Cpu::execute_cop0(u32 instr)
         // coprocessor's own operations, of which RFE is the only one
         // the BIOS uses.
         if ((instr & 0x3F) != 0x10) {
-            halt(std::format("unhandled COP0 op {:08X} at {:08X}",
-                             instr,
-                             current_pc));
+            halt(std::format(
+                "unhandled COP0 op {:08X} at {:08X}", instr, current_pc));
             break;
         }
         sr = (sr & ~0xFu) | ((sr >> 2) & 0xF);
         break;
     default:
-        halt(std::format("unhandled COP0 {:08X} at {:08X}",
-                         instr,
-                         current_pc));
+        halt(std::format("unhandled COP0 {:08X} at {:08X}", instr, current_pc));
         break;
     }
 }

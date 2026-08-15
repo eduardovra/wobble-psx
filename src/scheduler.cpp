@@ -1,5 +1,7 @@
 #include "scheduler.h"
 
+#include <algorithm>
+
 void Scheduler::reset()
 {
     now = 0;
@@ -25,9 +27,7 @@ u64 Scheduler::next_deadline() const
 {
     u64 earliest = NEVER;
     for (const u64 deadline : deadlines) {
-        if (deadline < earliest) {
-            earliest = deadline;
-        }
+        earliest = std::min(earliest, deadline);
     }
     return earliest;
 }
@@ -52,5 +52,5 @@ std::optional<DueEvent> Scheduler::next_due()
 
     const u64 deadline = deadlines[due];
     deadlines[due] = NEVER;
-    return DueEvent{static_cast<EventKind>(due), deadline};
+    return DueEvent{.kind = static_cast<EventKind>(due), .deadline = deadline};
 }

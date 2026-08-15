@@ -5,6 +5,10 @@ set(CMAKE_CXX_STANDARD 20)
 set(CMAKE_CXX_STANDARD_REQUIRED ON)
 set(CMAKE_CXX_EXTENSIONS OFF)
 
+# clang-tidy reads compile_commands.json to know how each file is
+# built, so always emit it.
+set(CMAKE_EXPORT_COMPILE_COMMANDS ON)
+
 include(FetchContent)
 
 set(SDL_TEST_LIBRARY OFF)
@@ -19,7 +23,12 @@ FetchContent_Declare(
     GIT_REPOSITORY https://github.com/ocornut/imgui.git
     GIT_TAG v1.91.9b
 )
-FetchContent_MakeAvailable(SDL3 imgui)
+FetchContent_Declare(
+    doctest
+    GIT_REPOSITORY https://github.com/doctest/doctest.git
+    GIT_TAG v2.4.11
+)
+FetchContent_MakeAvailable(SDL3 imgui doctest)
 
 add_library(imgui STATIC
     ${imgui_SOURCE_DIR}/imgui.cpp
@@ -36,16 +45,35 @@ target_include_directories(imgui PUBLIC
 )
 target_link_libraries(imgui PUBLIC SDL3::SDL3)
 
-add_executable(wobble
-    src/main.cpp
+# The emulated machine, with no dependency on SDL or any other host
+# library, so the tests can link it without a window system.
+add_library(core STATIC
     src/bus.cpp
     src/cpu.cpp
+    src/log.cpp
     src/scheduler.cpp
 )
-target_link_libraries(wobble PRIVATE imgui SDL3::SDL3)
-target_compile_options(wobble PRIVATE -Wall -Wextra)
+target_include_directories(core PUBLIC src)
 
-if(CMAKE_BUILD_TYPE STREQUAL "Debug")
-    target_compile_options(wobble PRIVATE -fsanitize=address,undefined)
-    target_link_options(wobble PRIVATE -fsanitize=address,undefined)
-endif()
+add_executable(wobble src/main.cpp)
+target_link_libraries(wobble PRIVATE core imgui SDL3::SDL3)
+
+add_executable(tests
+    tests/main.cpp
+    tests/test_cpu.cpp
+    tests/test_scheduler.cpp
+)
+target_link_libraries(tests PRIVATE core doctest::doctest)
+
+foreach(target core wobble tests)
+    target_compile_options(${target} PRIVATE -Wall -Wextra)
+    if(CMAKE_BUILD_TYPE STREQUAL "Debug")
+        target_compile_options(${target} PRIVATE
+            -fsanitize=address,undefined)
+        target_link_options(${target} PRIVATE
+            -fsanitize=address,undefined)
+    endif()
+endforeach()
+
+enable_testing()
+add_test(NAME tests COMMAND tests)

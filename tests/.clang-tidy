@@ -1,0 +1,8 @@
+# The test files inherit the project checks, minus two that fire on
+# doctest's macro expansion rather than on anything written here:
+# TEST_CASE defines a static function, and clang-tidy cannot see that
+# REQUIRE has already proven an optional holds a value.
+InheritParentConfig: true
+Checks: >
+  -misc-use-anonymous-namespace,
+  -bugprone-unchecked-optional-access

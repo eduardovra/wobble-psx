@@ -1,0 +1,69 @@
+#!/bin/sh
+# The same checks CI runs, before the commit is created. Enable with:
+#
+#     git config core.hooksPath .githooks
+#
+# Bypass a single commit with `git commit --no-verify`.
+#
+# Note this checks the working tree, not the staged snapshot: if you
+# have unstaged edits, they are included in what gets checked. That is
+# the usual trade-off — reconstructing the staged tree means stashing,
+# which risks the work in progress for little gain.
+set -e
+
+cd "$(git rev-parse --show-toplevel)"
+
+# Skip entirely unless something affecting the build is being
+# committed, so documentation-only commits stay instant.
+if ! git diff --cached --name-only |
+    grep -qE '^(src/|tests/|CMakeLists\.txt|\.clang-)'; then
+    exit 0
+fi
+
+# Prefer the pinned version CI uses, falling back to whatever is here.
+CLANG_FORMAT=clang-format-18
+CLANG_TIDY=clang-tidy-18
+command -v "$CLANG_FORMAT" >/dev/null 2>&1 || CLANG_FORMAT=clang-format
+command -v "$CLANG_TIDY" >/dev/null 2>&1 || CLANG_TIDY=clang-tidy
+
+for tool in "$CLANG_FORMAT" "$CLANG_TIDY" cmake ctest; do
+    if ! command -v "$tool" >/dev/null 2>&1; then
+        echo "pre-commit: $tool not found; see the README" >&2
+        exit 1
+    fi
+done
+
+if [ ! -d build ]; then
+    cmake -B build -G Ninja -DCMAKE_BUILD_TYPE=Debug
+fi
+
+# Cheapest check first, so an unformatted file fails in milliseconds
+# rather than after a build.
+echo "pre-commit: format"
+"$CLANG_FORMAT" --dry-run -Werror \
+    src/*.cpp src/*.h tests/*.cpp tests/*.h
+
+echo "pre-commit: build"
+cmake --build build
+
+echo "pre-commit: test"
+ctest --test-dir build --output-on-failure
+
+# One process per file: clang-tidy re-parses the SDL, ImGui and doctest
+# headers for every translation unit, which is most of its cost.
+#
+# Output is held back until it is known to matter. A passing run still
+# prints a "N warnings generated" tally per file, counting diagnostics
+# raised inside dependency headers and then filtered out by
+# HeaderFilterRegex — alarming to read, and about nothing.
+echo "pre-commit: lint"
+jobs=$(nproc 2>/dev/null || echo 4)
+tidy_log=$(mktemp)
+trap 'rm -f "$tidy_log"' EXIT
+
+if ! ls src/*.cpp tests/*.cpp |
+    xargs -P "$jobs" -n1 "$CLANG_TIDY" -p build --quiet \
+        >"$tidy_log" 2>&1; then
+    grep -vE '^[0-9]+ warnings generated\.$' "$tidy_log" >&2
+    exit 1
+fi

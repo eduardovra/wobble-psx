@@ -1,9 +1,10 @@
 #include "bus.h"
 
-#include <SDL3/SDL.h>
-
 #include <cstring>
 #include <fstream>
+#include <utility>
+
+#include "log.h"
 
 namespace {
 
@@ -23,12 +24,14 @@ namespace {
 //
 // Top three address bits select the memory region; masking them off
 // yields the physical address (KSEG0/KSEG1 mirror the same memory).
+// clang-format off
 constexpr u32 REGION_MASK[8] = {
     0xFFFFFFFF, 0xFFFFFFFF, 0xFFFFFFFF, 0xFFFFFFFF,  // KUSEG
     0x7FFFFFFF,                                      // KSEG0
     0x1FFFFFFF,                                      // KSEG1
     0xFFFFFFFF, 0xFFFFFFFF,                          // KSEG2
 };
+// clang-format on
 
 constexpr u32 BIOS_START = 0x1FC00000;
 constexpr u32 IO_START = 0x1F801000;
@@ -46,10 +49,7 @@ bool in_expansion1(u32 phys)
 // Shifting an address right by 29 leaves its top 3 bits: the region
 // index. Since this emulator has no caches, translating to a physical
 // address is all the region distinction amounts to here.
-u32 to_physical(u32 addr)
-{
-    return addr & REGION_MASK[addr >> 29];
-}
+u32 to_physical(u32 addr) { return addr & REGION_MASK[addr >> 29]; }
 
 // Memory is kept as raw bytes, so multi-byte accesses go through
 // memcpy rather than a reinterpreted pointer, which would break
@@ -77,8 +77,9 @@ bool Bus::load_bios(const std::string& path)
     if (!file) {
         return false;
     }
-    file.read(reinterpret_cast<char*>(bios.data()), bios.size());
-    return file.gcount() == static_cast<std::streamsize>(bios.size());
+    file.read(reinterpret_cast<char*>(bios.data()),
+              static_cast<std::streamsize>(bios.size()));
+    return std::cmp_equal(file.gcount(), bios.size());
 }
 
 u32 Bus::read32(u32 addr) const
@@ -93,7 +94,7 @@ u32 Bus::read32(u32 addr) const
     if (phys >= IO_START && phys < IO_END) {
         return 0;  // I/O not implemented yet
     }
-    SDL_Log("bus: unhandled read32 at %08X", addr);
+    log_format("bus: unhandled read32 at {:08X}", addr);
     return 0;
 }
 
@@ -109,7 +110,7 @@ u16 Bus::read16(u32 addr) const
     if (phys >= IO_START && phys < IO_END) {
         return 0;
     }
-    SDL_Log("bus: unhandled read16 at %08X", addr);
+    log_format("bus: unhandled read16 at {:08X}", addr);
     return 0;
 }
 
@@ -128,7 +129,7 @@ u8 Bus::read8(u32 addr) const
     if (in_expansion1(phys)) {
         return 0xFF;  // no expansion device present
     }
-    SDL_Log("bus: unhandled read8 at %08X", addr);
+    log_format("bus: unhandled read8 at {:08X}", addr);
     return 0;
 }
 
@@ -145,7 +146,7 @@ void Bus::write32(u32 addr, u32 value)
     if (addr == CACHE_CONTROL) {
         return;
     }
-    SDL_Log("bus: unhandled write32 at %08X = %08X", addr, value);
+    log_format("bus: unhandled write32 at {:08X} = {:08X}", addr, value);
 }
 
 void Bus::write16(u32 addr, u16 value)
@@ -158,7 +159,7 @@ void Bus::write16(u32 addr, u16 value)
     if (phys >= IO_START && phys < IO_END) {
         return;
     }
-    SDL_Log("bus: unhandled write16 at %08X = %04X", addr, value);
+    log_format("bus: unhandled write16 at {:08X} = {:04X}", addr, value);
 }
 
 void Bus::write8(u32 addr, u8 value)
@@ -171,5 +172,5 @@ void Bus::write8(u32 addr, u8 value)
     if (phys >= IO_START && phys < IO_END) {
         return;
     }
-    SDL_Log("bus: unhandled write8 at %08X = %02X", addr, value);
+    log_format("bus: unhandled write8 at {:08X} = {:02X}", addr, value);
 }

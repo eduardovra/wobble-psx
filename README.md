@@ -17,6 +17,48 @@ cmake --build build
 ./build/wobble
 ```
 
+## Tests
+
+```sh
+ctest --test-dir build --output-on-failure
+```
+
+The emulated machine is built as `core`, a library with no dependency
+on SDL or any other host library, so the tests link it and run without
+a window system or a BIOS image. They assemble short programs straight
+into RAM and assert on the resulting CPU state, which covers the parts
+that are easy to get subtly wrong: the load and branch delay slots,
+what an exception records, and the scheduler's timekeeping.
+
+Validating the interpreter against a real test ROM is tracked in
+[issue #1](https://github.com/eduardovra/wobble-psx/issues/1).
+
+## Formatting and linting
+
+`clang-format` fixes layout and include ordering; `clang-tidy` looks
+for bugs. Both are enforced in CI, and both read their configuration
+from the repository root.
+
+```sh
+clang-format -i src/*.cpp src/*.h tests/*.cpp tests/*.h
+clang-tidy -p build src/*.cpp tests/*.cpp
+```
+
+Install them with `apt install clang-format clang-tidy`, or without
+root via `pip install clang-format clang-tidy`. CI pins version 18,
+because which checks exist and what they flag varies between releases.
+
+A hook runs the same four checks — format, build, test, lint — before
+each commit, taking a few seconds on an up-to-date build. Enable it
+once per clone:
+
+```sh
+git config core.hooksPath .githooks
+```
+
+It skips commits that touch neither the build nor the sources, and
+`git commit --no-verify` bypasses it for a single commit.
+
 ## References
 
 - [psx-spx](https://psx-spx.consoledev.net/) — hardware documentation
