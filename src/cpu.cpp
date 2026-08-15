@@ -5,16 +5,51 @@
 
 namespace {
 
+// Execution starts in the BIOS ROM, at the top of the uncached KSEG1
+// region.
 constexpr u32 RESET_PC = 0xBFC00000;
+
+// Status register bits. Isolating the cache redirects stores into the
+// scratchpad instead of memory; the BIOS does this while it clears the
+// cache at boot.
 constexpr u32 SR_ISOLATE_CACHE = 1 << 16;
 constexpr u32 SR_BOOT_VECTORS = 1 << 22;  // BEV: vectors in ROM
+
 constexpr u32 CAUSE_BRANCH_DELAY = 1u << 31;
 
+// MIPS instruction encoding. Every instruction is exactly 32 bits and
+// its fields sit at fixed bit positions, so decoding is a shift and a
+// mask rather than a parse. Three layouts share those positions:
+//
+//   R (register)   op(6) rs(5) rt(5) rd(5) shamt(5) funct(6)
+//   I (immediate)  op(6) rs(5) rt(5) imm(16)
+//   J (jump)       op(6) target(26)
+//
+//   31    26 25  21 20  16 15  11 10   6 5     0
+//   +-------+------+------+------+------+-------+
+//   |  op   |  rs  |  rt  |  rd  |shamt | funct |  R
+//   +-------+------+------+------+------+-------+
+//   |  op   |  rs  |  rt  |        imm          |  I
+//   +-------+------+------+---------------------+
+//   |  op   |               target              |  J
+//   +-------+-----------------------------------+
+//
+// Which fields are meaningful depends on the opcode, so these
+// accessors just carve out bit ranges without judging whether the
+// field applies. Each register field is 5 bits: 32 registers.
 u32 rs(u32 instr) { return (instr >> 21) & 0x1F; }
 u32 rt(u32 instr) { return (instr >> 16) & 0x1F; }
 u32 rd(u32 instr) { return (instr >> 11) & 0x1F; }
+
+// Shift amount, 0-31, used by the constant-distance shift ops.
 u32 shamt(u32 instr) { return (instr >> 6) & 0x1F; }
+
+// The I-format immediate, zero-extended (logical ops treat it so).
 u32 imm(u32 instr) { return instr & 0xFFFF; }
+
+// The same immediate sign-extended, for arithmetic and for the
+// address offsets of loads, stores and branches. The round trip
+// through s16 is what does the extension.
 u32 imm_se(u32 instr)
 {
     return static_cast<u32>(static_cast<s16>(instr & 0xFFFF));
@@ -50,6 +85,9 @@ void Cpu::step()
 
     current_pc = pc;
 
+    // The BIOS exposes its kernel calls as jumps to fixed addresses,
+    // with the function number in $t1. Watching for the putchar calls
+    // here gets us the boot log without emulating a serial port.
     // BIOS putchar: A-function 0x3C / B-function 0x3D, char in $a0
     const u32 masked_pc = current_pc & 0x1FFFFFFF;
     const bool is_putchar_a = masked_pc == 0xA0 && regs[9] == 0x3C;
@@ -59,9 +97,15 @@ void Cpu::step()
     }
 
     const u32 instr = bus.read32(pc);
+
+    // Advance both counters before executing, so a branch taken by
+    // this instruction rewrites next_pc while pc — already pointing at
+    // the delay slot — is left alone.
     pc = next_pc;
     next_pc += 4;
 
+    // A branch set `branching` on the previous step, which makes this
+    // instruction its delay slot.
     in_delay_slot = branching;
     branching = false;
 
@@ -73,6 +117,7 @@ void Cpu::step()
 
     execute(instr);
 
+    // Writes made by this instruction become readable from here on.
     regs = out_regs;
 }
 
@@ -90,20 +135,30 @@ void Cpu::schedule_load(u32 index, u32 value)
 
 void Cpu::branch(u32 offset)
 {
-    // offset is relative to the delay slot, which pc points at now
+    // The offset counts instructions, not bytes, so it is stored
+    // pre-divided by 4 — shifting it back up buys 16 bits of encoding
+    // a ±128 KB reach. It is relative to the delay slot, which pc
+    // already points at.
     next_pc = pc + (offset << 2);
     branching = true;
 }
 
 void Cpu::raise_exception(Exception code)
 {
-    // mode/interrupt bit pairs in SR act as a 3-deep stack: push
+    // The low 6 bits of SR are three (interrupt-enable, user-mode)
+    // pairs acting as a 3-deep stack. Shifting them left by 2 pushes a
+    // new entry — zeroed, so the handler runs in kernel mode with
+    // interrupts off — and drops the oldest. RFE shifts them back.
     const u32 mode = sr & 0x3F;
     sr = (sr & ~0x3Fu) | ((mode << 2) & 0x3F);
 
+    // ExcCode sits at bits 6..2 of Cause.
     cause = static_cast<u32>(code) << 2;
+
     epc = current_pc;
     if (in_delay_slot) {
+        // Returning into a delay slot alone would skip the branch, so
+        // epc points at the branch and the handler re-runs both.
         epc -= 4;
         cause |= CAUSE_BRANCH_DELAY;
     }
@@ -119,6 +174,10 @@ void Cpu::halt(std::string reason)
     halt_reason = std::move(reason);
 }
 
+// Primary decode. The top 6 bits (31..26) are the opcode, so shifting
+// the instruction right by 26 leaves just that field to switch on.
+// Two of its values are escapes into a secondary table rather than
+// instructions of their own: 0x00 (SPECIAL) and 0x10 (COP0).
 void Cpu::execute(u32 instr)
 {
     switch (instr >> 26) {
@@ -126,6 +185,9 @@ void Cpu::execute(u32 instr)
         execute_special(instr);
         break;
     case 0x01: {  // BLTZ / BGEZ / BLTZAL / BGEZAL
+        // Four instructions packed into one opcode: the rt field is
+        // not a register here but a selector. Bit 0 picks the test
+        // direction, and 0b10000 in bits 4..1 asks for the link.
         const u32 cond = rt(instr);
         const bool is_bgez = cond & 1;
         const bool links = (cond & 0x1E) == 0x10;
@@ -133,16 +195,24 @@ void Cpu::execute(u32 instr)
         if (links) {
             set_reg(31, next_pc);
         }
+        // BGEZ wants non-negative, BLTZ wants negative: one test
+        // serves both when the wanted answer differs by variant.
         if (is_bgez != is_negative) {
             branch(imm_se(instr));
         }
         break;
     }
     case 0x02:  // J
+        // The 26-bit target is also an instruction count, so it
+        // shifts up by 2 to give 28 bits of address. The missing top
+        // 4 bits come from the current pc: a jump cannot leave its
+        // 256 MB region — only JR, taking a full register, can.
         next_pc = (pc & 0xF0000000) | ((instr & 0x3FFFFFF) << 2);
         branching = true;
         break;
     case 0x03:  // JAL
+        // Same jump, but $ra (r31) keeps the return address. This is
+        // how a call is made; the matching return is JR $ra.
         set_reg(31, next_pc);
         next_pc = (pc & 0xF0000000) | ((instr & 0x3FFFFFF) << 2);
         branching = true;
@@ -200,11 +270,21 @@ void Cpu::execute(u32 instr)
         set_reg(rt(instr), reg(rs(instr)) ^ imm(instr));
         break;
     case 0x0F:  // LUI
+        // No instruction can carry a 32-bit constant, so one is built
+        // in two steps: LUI puts the immediate in the high half, then
+        // an ORI supplies the low half.
         set_reg(rt(instr), imm(instr) << 16);
         break;
     case 0x10:
         execute_cop0(instr);
         break;
+
+    // Loads and stores, the only instructions that touch memory. All
+    // of them address as register + sign-extended offset. Loads take
+    // effect one instruction later (schedule_load); stores are
+    // immediate. Anything wider than a byte must be aligned — real
+    // hardware raises an exception, which this emulator does not
+    // implement yet, so it halts instead.
     case 0x20: {  // LB
         const u32 addr = reg(rs(instr)) + imm_se(instr);
         const s8 value = static_cast<s8>(bus.read8(addr));
@@ -246,7 +326,7 @@ void Cpu::execute(u32 instr)
     }
     case 0x28: {  // SB
         if (sr & SR_ISOLATE_CACHE) {
-            break;
+            break;  // cache writes, not memory — ignore for now
         }
         const u32 addr = reg(rs(instr)) + imm_se(instr);
         bus.write8(addr, static_cast<u8>(reg(rt(instr))));
@@ -284,6 +364,10 @@ void Cpu::execute(u32 instr)
     }
 }
 
+// Opcode 0x00 is not one instruction but a whole second table. These
+// are the R-format instructions — register-to-register arithmetic,
+// shifts and the register jumps — which need no immediate field, so
+// the freed low 6 bits (the funct field) select among them.
 void Cpu::execute_special(u32 instr)
 {
     switch (instr & 0x3F) {
@@ -311,10 +395,12 @@ void Cpu::execute_special(u32 instr)
         break;
     }
     case 0x08:  // JR
+        // Jump to a full 32-bit address held in a register. JR $ra is
+        // how a function returns.
         next_pc = reg(rs(instr));
         branching = true;
         break;
-    case 0x09:  // JALR
+    case 0x09:  // JALR (JR that saves a return address, like JAL)
         set_reg(rd(instr), next_pc);
         next_pc = reg(rs(instr));
         branching = true;
@@ -322,6 +408,11 @@ void Cpu::execute_special(u32 instr)
     case 0x0C:  // SYSCALL
         raise_exception(Exception::Syscall);
         break;
+    // Multiply and divide write the hi/lo pair rather than a general
+    // register — a 32x32 product needs 64 bits, and division yields a
+    // quotient and a remainder. MFHI/MFLO move the halves back out.
+    // Real hardware stalls a reader until the result is ready; here
+    // they are instant.
     case 0x10:  // MFHI
         set_reg(rd(instr), hi);
         break;
@@ -351,6 +442,9 @@ void Cpu::execute_special(u32 instr)
         break;
     }
     case 0x1A: {  // DIV (special-cased results, never traps)
+        // Divide by zero and INT32_MIN / -1 have no right answer, but
+        // the hardware still produces defined garbage instead of an
+        // exception — compilers rely on not having to check.
         const s32 n = static_cast<s32>(reg(rs(instr)));
         const s32 d = static_cast<s32>(reg(rt(instr)));
         if (d == 0) {
@@ -423,6 +517,15 @@ void Cpu::execute_special(u32 instr)
     }
 }
 
+// Opcode 0x10 reaches coprocessor 0, the system control unit that
+// holds the status, exception and (on other MIPS chips) MMU state.
+// The R3000A defines four coprocessor slots; the PlayStation wires
+// COP0 to system control and COP2 to the GTE, the geometry engine
+// that transforms 3D vertices. COP1 (an FPU) and COP3 are absent.
+//
+// The rs field, a register number in ordinary instructions, is the
+// operation selector here: move from / move to the coprocessor, or
+// a coprocessor-specific op such as RFE.
 void Cpu::execute_cop0(u32 instr)
 {
     switch (rs(instr)) {
@@ -460,6 +563,9 @@ void Cpu::execute_cop0(u32 instr)
         }
         break;
     case 0x10:  // RFE: pop the mode stack pushed by the exception
+        // Not a move at all — the funct field distinguishes the
+        // coprocessor's own operations, of which RFE is the only one
+        // the BIOS uses.
         if ((instr & 0x3F) != 0x10) {
             halt(std::format("unhandled COP0 op {:08X} at {:08X}",
                              instr,

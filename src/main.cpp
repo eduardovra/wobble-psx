@@ -1,3 +1,7 @@
+// Host side of the emulator: it owns the window, the debugger UI and
+// the frame loop that drives the CPU. The emulated machine itself is
+// just a Bus (memory and devices) with a Cpu attached to it.
+
 #include <SDL3/SDL.h>
 #include <imgui.h>
 #include <imgui_impl_sdl3.h>
@@ -8,6 +12,9 @@
 
 namespace {
 
+// Conventional MIPS register names, in register-number order. The
+// hardware only numbers them; the names are an ABI convention, but
+// they are what disassembly and BIOS documentation use.
 constexpr const char* REG_NAMES[32] = {
     "zero", "at", "v0", "v1", "a0", "a1", "a2", "a3",
     "t0",   "t1", "t2", "t3", "t4", "t5", "t6", "t7",
@@ -19,6 +26,7 @@ constexpr const char* REG_NAMES[32] = {
 // keeps the UI responsive while the BIOS executes.
 constexpr int INSTRUCTIONS_PER_FRAME = 100000;
 
+// Debugger panel: run/pause/step controls and the full register file.
 void draw_cpu_window(Cpu& cpu, bool& emu_running)
 {
     ImGui::Begin("CPU");
@@ -61,6 +69,8 @@ void draw_cpu_window(Cpu& cpu, bool& emu_running)
     ImGui::End();
 }
 
+// What the BIOS has printed, captured by the CPU's putchar hook.
+// It is the main sign of life before there is a GPU to draw with.
 void draw_tty_window(const Cpu& cpu)
 {
     ImGui::Begin("TTY");
