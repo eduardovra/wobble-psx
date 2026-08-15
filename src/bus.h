@@ -2,6 +2,7 @@
 
 #include <array>
 #include <string>
+#include <unordered_set>
 
 #include "types.h"
 
@@ -32,6 +33,23 @@ struct Bus {
     void write16(u32 addr, u16 value);
     void write32(u32 addr, u32 value);
 
+    // Records an address that no device claimed, and reports whether
+    // it had not been seen before. An unimplemented register is
+    // usually polled in a loop, so logging every access buries the
+    // information and costs a formatted string and a write each time
+    // round; saying it once turns the log into a list of what is
+    // still missing.
+    //
+    // Keyed on the address alone: a read and a write to the same
+    // register are one missing device, not two.
+    bool note_unhandled(u32 addr) const;
+
     std::array<u8, RAM_SIZE> ram{};
     std::array<u8, BIOS_SIZE> bios{};
+
+    // Mutable because the read paths are const: noting an address is
+    // bookkeeping about the emulator, not a change to the machine.
+    // Bounded by the number of distinct unhandled addresses a game
+    // actually touches, which is small.
+    mutable std::unordered_set<u32> reported_addresses;
 };

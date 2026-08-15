@@ -60,6 +60,7 @@ target_link_libraries(wobble PRIVATE core imgui SDL3::SDL3)
 
 add_executable(tests
     tests/main.cpp
+    tests/test_bus.cpp
     tests/test_cpu.cpp
     tests/test_scheduler.cpp
 )

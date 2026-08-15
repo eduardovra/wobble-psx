@@ -1,6 +1,7 @@
 #include "bus.h"
 
 #include <cstring>
+#include <format>
 #include <fstream>
 #include <utility>
 
@@ -71,6 +72,11 @@ void write_to(std::array<u8, N>& mem, u32 offset, T value)
 
 }  // namespace
 
+bool Bus::note_unhandled(u32 addr) const
+{
+    return reported_addresses.insert(addr).second;
+}
+
 bool Bus::load_bios(const std::string& path)
 {
     std::ifstream file(path, std::ios::binary);
@@ -94,7 +100,9 @@ u32 Bus::read32(u32 addr) const
     if (phys >= IO_START && phys < IO_END) {
         return 0;  // I/O not implemented yet
     }
-    log_format("bus: unhandled read32 at {:08X}", addr);
+    if (note_unhandled(addr)) {
+        log_message(std::format("bus: unhandled read32 at {:08X}", addr));
+    }
     return 0;
 }
 
@@ -110,7 +118,9 @@ u16 Bus::read16(u32 addr) const
     if (phys >= IO_START && phys < IO_END) {
         return 0;
     }
-    log_format("bus: unhandled read16 at {:08X}", addr);
+    if (note_unhandled(addr)) {
+        log_message(std::format("bus: unhandled read16 at {:08X}", addr));
+    }
     return 0;
 }
 
@@ -129,7 +139,9 @@ u8 Bus::read8(u32 addr) const
     if (in_expansion1(phys)) {
         return 0xFF;  // no expansion device present
     }
-    log_format("bus: unhandled read8 at {:08X}", addr);
+    if (note_unhandled(addr)) {
+        log_message(std::format("bus: unhandled read8 at {:08X}", addr));
+    }
     return 0;
 }
 
@@ -146,7 +158,10 @@ void Bus::write32(u32 addr, u32 value)
     if (addr == CACHE_CONTROL) {
         return;
     }
-    log_format("bus: unhandled write32 at {:08X} = {:08X}", addr, value);
+    if (note_unhandled(addr)) {
+        log_message(std::format(
+            "bus: unhandled write32 at {:08X} = {:08X}", addr, value));
+    }
 }
 
 void Bus::write16(u32 addr, u16 value)
@@ -159,7 +174,10 @@ void Bus::write16(u32 addr, u16 value)
     if (phys >= IO_START && phys < IO_END) {
         return;
     }
-    log_format("bus: unhandled write16 at {:08X} = {:04X}", addr, value);
+    if (note_unhandled(addr)) {
+        log_message(std::format(
+            "bus: unhandled write16 at {:08X} = {:04X}", addr, value));
+    }
 }
 
 void Bus::write8(u32 addr, u8 value)
@@ -172,5 +190,8 @@ void Bus::write8(u32 addr, u8 value)
     if (phys >= IO_START && phys < IO_END) {
         return;
     }
-    log_format("bus: unhandled write8 at {:08X} = {:02X}", addr, value);
+    if (note_unhandled(addr)) {
+        log_message(std::format(
+            "bus: unhandled write8 at {:08X} = {:02X}", addr, value));
+    }
 }
