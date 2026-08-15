@@ -63,8 +63,9 @@ on SDL or any other host library, so the tests link it and run without
 a window system or a BIOS image. They assemble short programs straight
 into RAM and assert on the resulting CPU state, which covers the parts
 that are easy to get subtly wrong: the load and branch delay slots,
-what an exception records, the scheduler's timekeeping, and the
-handshake between a device raising an interrupt and the CPU taking it.
+what an exception records, the scheduler's timekeeping, what each
+instruction costs the clock, and the handshake between a device raising
+an interrupt and the CPU taking it.
 
 Validating the interpreter against a real test ROM is tracked in
 [issue #1](https://github.com/eduardovra/wobble-psx/issues/1).

@@ -80,6 +80,7 @@ add_executable(tests
     tests/test_gpu.cpp
     tests/test_irq.cpp
     tests/test_scheduler.cpp
+    tests/test_timing.cpp
 )
 target_link_libraries(tests PRIVATE core doctest::doctest)
 

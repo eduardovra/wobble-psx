@@ -22,12 +22,28 @@ struct State;
 //   0x1F801000  8 KB   hardware registers — GPU, SPU, DMA, timers…
 //   0x1FC00000  512 KB BIOS ROM
 //
-// So far only RAM, the BIOS and the interrupt controller are real; the
-// rest of the register range reads as zero and swallows writes, which
-// is enough to get the BIOS booting.
+// So far RAM, the BIOS, the interrupt controller, the GPU's ports and
+// the DMA controller are real; the rest of the register range reads as
+// zero and swallows writes, which is enough to get the BIOS booting.
+// The scratchpad is among the missing — nothing has asked for it yet.
 struct Bus {
     static constexpr u32 RAM_SIZE = 2 * 1024 * 1024;
     static constexpr u32 BIOS_SIZE = 512 * 1024;
+
+    // What a load costs, by region, in CPU cycles — hardware
+    // measurements taken from psx-spx's "Load Timing". Each figure
+    // includes the one cycle the instruction takes to issue, so the
+    // stall charged on top of that is the figure minus one.
+    //
+    // There is no data cache on the PSX (the SRAM that would be one is
+    // the scratchpad), so every load pays the full price and the
+    // cached and uncached windows onto RAM cost the same. That makes a
+    // load several times more expensive than an ALU instruction, which
+    // is most of the difference between this machine's speed and the
+    // one instruction per cycle it used to run at.
+    static constexpr u32 IO_LOAD_CYCLES = 5;     // one shared decoder
+    static constexpr u32 RAM_LOAD_CYCLES = 7;    // plus DRAM refresh
+    static constexpr u32 BIOS_LOAD_CYCLES = 27;  // 8-bit ROM bus
 
     // Reads the whole 512 KB image; false if it is missing or short.
     bool load_bios(const std::string& path);
@@ -57,6 +73,13 @@ struct Bus {
     // to the registers implemented so far.
     bool read_io(u32 phys, u32& value);
     bool write_io(u32 phys, u32 value);
+
+    // Cycles the accesses made so far have stalled the CPU for, over
+    // and above the one cycle the instruction itself costs. The CPU
+    // clears it each step and bills whatever is left at the end, which
+    // keeps the region timings here, next to the decode that knows
+    // which region an address is in.
+    u32 stall_cycles = 0;
 
     // Records an address that no device claimed, and reports whether
     // it had not been seen before. An unimplemented register is

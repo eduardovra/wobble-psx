@@ -11,12 +11,14 @@ namespace {
 // region.
 constexpr u32 RESET_PC = 0xBFC00000;
 
-// What one instruction costs the master clock. A flat charge is a
-// deliberate placeholder: the real chip pays extra for memory waits,
-// multiply/divide latency and cache misses, and refining any of that
-// means returning a per-instruction figure from step() instead of
-// this one. Games need a clock that advances at roughly the right
-// rate far more than they need it to be exact.
+// What an instruction costs before its memory accesses. The R3000A
+// issues one per cycle, so this is the floor and everything above it
+// is a stall; step() adds what the bus charged for the loads made,
+// which is where nearly all the difference comes from.
+//
+// Multiply and divide latency is not modelled: they take 6 to 36
+// cycles on hardware, but only if the result is read before they
+// finish, and the compilers of the era spaced them out.
 constexpr u32 CYCLES_PER_INSTRUCTION = 1;
 
 // Status register bits. Isolating the cache redirects stores into the
@@ -134,6 +136,7 @@ u32 Cpu::step()
     }
 
     current_pc = pc;
+    bus.stall_cycles = 0;
 
     // The BIOS exposes its kernel calls as jumps to fixed addresses,
     // with the function number in $t1. Watching for the putchar calls
@@ -168,6 +171,15 @@ u32 Cpu::step()
     } else {
         const u32 instr = bus.read32(current_pc);
 
+        // The fetch is not billed. There is an instruction cache on
+        // the R3000A and none here, so code running from RAM — which
+        // is nearly all of it — fetches at one cycle on hardware and
+        // would cost seven if this counted it. Charging nothing is the
+        // closer of the two answers until the cache is modelled; the
+        // price is that the BIOS's own uncached run out of ROM, which
+        // nothing times, comes out faster than it really is.
+        bus.stall_cycles = 0;
+
         // Advance both counters before executing, so a branch taken by
         // this instruction rewrites next_pc while pc — already
         // pointing at the delay slot — is left alone.
@@ -180,7 +192,7 @@ u32 Cpu::step()
     // Writes made by this instruction become readable from here on.
     regs = out_regs;
 
-    return CYCLES_PER_INSTRUCTION;
+    return CYCLES_PER_INSTRUCTION + bus.stall_cycles;
 }
 
 void Cpu::set_reg(u32 index, u32 value)

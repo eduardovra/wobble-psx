@@ -54,6 +54,29 @@ bool in_expansion1(u32 phys)
 // address is all the region distinction amounts to here.
 u32 to_physical(u32 addr) { return addr & REGION_MASK[addr >> 29]; }
 
+// How long a load from this address stalls the CPU, beyond the one
+// cycle the instruction costs anyway. Repeating the range checks the
+// read paths make is a few comparisons against keeping the timing
+// spread over all nine of their branches.
+//
+// Everything unclaimed reads back as zero without a bus access, so it
+// stalls for nothing. The BIOS figure is for a full word: its ROM is
+// on an 8-bit bus, so a byte load is really a quarter of it, which is
+// not worth splitting for a region nothing reads data from in anger.
+u32 load_stall(u32 phys)
+{
+    if (phys < Bus::RAM_SIZE) {
+        return Bus::RAM_LOAD_CYCLES - 1;
+    }
+    if (phys >= IO_START && phys < IO_END) {
+        return Bus::IO_LOAD_CYCLES - 1;
+    }
+    if (phys >= BIOS_START && phys < BIOS_START + Bus::BIOS_SIZE) {
+        return Bus::BIOS_LOAD_CYCLES - 1;
+    }
+    return 0;
+}
+
 // Memory is kept as raw bytes, so multi-byte accesses go through
 // memcpy rather than a reinterpreted pointer, which would break
 // strict aliasing. The PSX is little-endian, and so is every host
@@ -137,6 +160,12 @@ bool Bus::write_io(u32 phys, u32 value)
         // here, inside the store instruction that asked for it.
         const u32 channel = dma.write_register(phys, value);
         if (channel != Dma::NO_CHANNEL) {
+            // The whole transfer happens inside this store, and costs
+            // it nothing: run_dma reaches RAM directly rather than
+            // through the read paths above, so none of its accesses
+            // are billed. DMA does take the bus away from the CPU on
+            // hardware, but charging that means running the transfer
+            // on the scheduler rather than all at once here.
             run_dma(*this, channel);
         }
         return true;
@@ -166,6 +195,7 @@ u32 Bus::read32(u32 addr)
         debug->note_access(addr, 4, false);
     }
     const u32 phys = to_physical(addr);
+    stall_cycles += load_stall(phys);
     if (phys < RAM_SIZE) {
         return read_from<u32>(ram, phys);
     }
@@ -189,6 +219,7 @@ u16 Bus::read16(u32 addr)
         debug->note_access(addr, 2, false);
     }
     const u32 phys = to_physical(addr);
+    stall_cycles += load_stall(phys);
     if (phys < RAM_SIZE) {
         return read_from<u16>(ram, phys);
     }
@@ -212,6 +243,7 @@ u8 Bus::read8(u32 addr)
         debug->note_access(addr, 1, false);
     }
     const u32 phys = to_physical(addr);
+    stall_cycles += load_stall(phys);
     if (phys < RAM_SIZE) {
         return ram[phys];
     }
