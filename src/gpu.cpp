@@ -19,6 +19,28 @@ u32 transfer_extent(u32 value, u32 limit)
     return ((value - 1) & (limit - 1)) + 1;
 }
 
+// Coordinates in drawing commands are eleven-bit signed fields packed
+// into a word, so the sign has to be put back by hand.
+s32 sign_extend_11(u32 value)
+{
+    const u32 low = value & 0x7FF;
+    return static_cast<s32>(low < 0x400 ? low : low - 0x800);
+}
+
+// The flag bits every drawing command shares, in the low five bits of
+// its command byte. Not all of them apply to every family — a
+// rectangle is never shaded across, and an untextured primitive has no
+// palette — but reading them all here costs nothing.
+Shading shading_of(u32 op)
+{
+    Shading how;
+    how.raw = (op & 0x01) != 0;
+    how.translucent = (op & 0x02) != 0;
+    how.textured = (op & 0x04) != 0;
+    how.gouraud = (op & 0x10) != 0 && op < 0x60;
+    return how;
+}
+
 }  // namespace
 
 u32 gp0_length(u32 command)
@@ -68,6 +90,53 @@ u32 gp0_length(u32 command)
     default:  // E0h..FFh, drawing settings, one word each
         return 1;
     }
+}
+
+s32 Gpu::offset_x() const { return sign_extend_11(draw_offset); }
+
+s32 Gpu::offset_y() const { return sign_extend_11(draw_offset >> 11); }
+
+u32 Gpu::display_width() const
+{
+    // Bit 6 asks for 368 pixels and overrules the two-bit field below
+    // it, which is the odd one out because it was added late.
+    if (((display_mode >> 6) & 1) != 0) {
+        return 368;
+    }
+    constexpr std::array<u32, 4> WIDTHS = {256, 320, 512, 640};
+    return WIDTHS[display_mode & 3];
+}
+
+u32 Gpu::display_height() const
+{
+    // The taller mode only exists interlaced: it is the two fields
+    // together, so without interlacing there is only ever one of them.
+    const bool tall = ((display_mode >> 2) & 1) != 0;
+    return tall && interlaced() ? 480 : 240;
+}
+
+Gpu::Colour Gpu::display_pixel(u32 x, u32 y) const
+{
+    if (x >= display_width() || y >= display_height()) {
+        return {};
+    }
+
+    const u32 start_x = display_start & 0x3FF;
+    const u32 start_y = (display_start >> 10) & 0x1FF;
+    const std::size_t at =
+        std::size_t{(start_y + y) % VRAM_HEIGHT} * VRAM_WIDTH +
+        (start_x + x) % VRAM_WIDTH;
+    const u16 pixel = vram[at];
+
+    // Five bits to eight, with the top bits repeated into the bottom
+    // ones so that a full-brightness channel comes out full rather
+    // than a little short of it.
+    const auto stretch = [](u32 value) {
+        return static_cast<u8>((value << 3) | (value >> 2));
+    };
+    return {stretch(pixel & 0x1F),
+            stretch((pixel >> 5) & 0x1F),
+            stretch((pixel >> 10) & 0x1F)};
 }
 
 void Gpu::visit_state(State& state)
@@ -294,7 +363,26 @@ void Gpu::execute_gp0()
         break;
     }
 
-    if (op >= 0xA0 && op <= 0xBF) {
+    if (op == 0x02) {
+        fill_vram(*this,
+                  command[1] & 0x3F0,
+                  (command[1] >> 16) & 0x1FF,
+                  ((command[2] & 0x3FF) + 0xF) & ~0xFu,
+                  (command[2] >> 16) & 0x1FF,
+                  command[0] & 0xFFFFFF);
+    } else if (op >= 0x20 && op <= 0x3F) {
+        draw_polygon();
+    } else if (op >= 0x60 && op <= 0x7F) {
+        draw_sprite();
+    } else if (op >= 0x80 && op <= 0x9F) {
+        copy_vram(*this,
+                  command[1] & 0x3FF,
+                  (command[1] >> 16) & 0x1FF,
+                  command[2] & 0x3FF,
+                  (command[2] >> 16) & 0x1FF,
+                  transfer_extent(command[3] & 0xFFFF, VRAM_WIDTH),
+                  transfer_extent((command[3] >> 16) & 0xFFFF, VRAM_HEIGHT));
+    } else if (op >= 0xA0 && op <= 0xBF) {
         begin_transfer();
         mode = Gp0Mode::ImageLoad;
     } else if (op >= 0xC0 && op <= 0xDF) {
@@ -306,8 +394,107 @@ void Gpu::execute_gp0()
         // until the terminator.
         mode = Gp0Mode::PolyLine;
     }
-    // Anything else draws, which this emulator does not do yet. Its
-    // words have been counted off, so the stream stays in step.
+    // Lines are the remainder, and are still counted off and dropped.
+}
+
+// A vertex word is a signed pair packed into a word, eleven bits each
+// with the rest ignored, and everything is drawn relative to the offset
+// GP0(E5h) set.
+Vertex Gpu::vertex_at(u32 word) const
+{
+    Vertex corner;
+    corner.x = sign_extend_11(word) + offset_x();
+    corner.y = sign_extend_11(word >> 16) + offset_y();
+    return corner;
+}
+
+void Gpu::draw_polygon()
+{
+    const u32 op = command[0] >> 24;
+    Shading how = shading_of(op);
+
+    const u32 corners = (op & 0x08) != 0 ? 4 : 3;
+
+    // The words are walked with a cursor rather than a stride, because
+    // the corners are not all the same length: under Gouraud shading
+    // the first one takes its colour from the command word while every
+    // other one carries its own.
+    std::array<Vertex, 4> shape;
+    u32 word = 1;
+    for (u32 i = 0; i < corners; i++) {
+        u32 colour = command[0] & 0xFFFFFF;
+        if (how.gouraud && i > 0) {
+            colour = command[word] & 0xFFFFFF;
+            word++;
+        }
+
+        shape[i] = vertex_at(command[word]);
+        shape[i].colour = colour;
+        word++;
+
+        if (how.textured) {
+            const u32 texture = command[word];
+            shape[i].u = texture & 0xFF;
+            shape[i].v = (texture >> 8) & 0xFF;
+            // The palette rides along with the first corner and the
+            // texture page with the second; the rest carry nothing but
+            // their own coordinates.
+            if (i == 0) {
+                how.clut = texture >> 16;
+            }
+            if (i == 1) {
+                how.texpage = (texture >> 16) & 0x1FF;
+            }
+            word++;
+        }
+    }
+
+    draw_triangle(*this, {shape[0], shape[1], shape[2]}, how);
+    if (corners == 4) {
+        // A quad is two triangles sharing the diagonal between the
+        // second and third corners, which is the order the GPU takes
+        // them in — hence the fan rather than a loop.
+        draw_triangle(*this, {shape[1], shape[2], shape[3]}, how);
+    }
+}
+
+void Gpu::draw_sprite()
+{
+    const u32 op = command[0] >> 24;
+    Shading how = shading_of(op);
+    how.texpage = draw_mode & 0x1FF;  // a sprite has no page of its own
+
+    Vertex corner = vertex_at(command[1]);
+    corner.colour = command[0] & 0xFFFFFF;
+
+    u32 word = 2;
+    if (how.textured) {
+        corner.u = command[word] & 0xFF;
+        corner.v = (command[word] >> 8) & 0xFF;
+        how.clut = command[word] >> 16;
+        word++;
+    }
+
+    // Bits 4..3 give a fixed 1x1, 8x8 or 16x16; zero means the size
+    // arrives as a further word.
+    u32 width = 1;
+    u32 height = 1;
+    switch ((op >> 3) & 3) {
+    case 1:
+        break;
+    case 2:
+        width = height = 8;
+        break;
+    case 3:
+        width = height = 16;
+        break;
+    default:
+        width = command[word] & 0x3FF;
+        height = (command[word] >> 16) & 0x1FF;
+        break;
+    }
+
+    draw_rectangle(*this, corner, width, height, how);
 }
 
 void Gpu::begin_transfer()

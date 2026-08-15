@@ -3,6 +3,7 @@
 #include <array>
 #include <cstddef>
 
+#include "raster.h"
 #include "types.h"
 
 struct State;
@@ -23,10 +24,10 @@ struct State;
 // command after it — which is why gp0_length() is the heart of this
 // file and is tested command by command.
 //
-// Drawing is not implemented. Commands that would rasterize are parsed
-// and their words consumed, then discarded; everything that only moves
-// data or sets state is real. That split is what lets GPUSTAT be
-// derived from actual state rather than answering with a constant.
+// Drawing happens straight into VRAM as each command arrives, with no
+// display list and no deferral, because that is what the hardware does
+// and there is nothing here a frame boundary would let us batch. Lines
+// are the one family still parsed and dropped.
 struct Gpu {
     static constexpr u32 GP0 = 0x1F801810;
     static constexpr u32 GP1 = 0x1F801814;
@@ -71,6 +72,35 @@ struct Gpu {
     bool interlaced() const { return ((display_mode >> 5) & 1) != 0; }
 
     u32 status() const;
+
+    // The clipping rectangle GP0(E3h) and GP0(E4h) set, and the shift
+    // GP0(E5h) applies to every vertex. All three are kept as the words
+    // software wrote, so this is where they are taken apart. The two
+    // corners are inclusive: a one-pixel draw area has them equal.
+    u32 clip_left() const { return draw_area_top & 0x3FF; }
+    u32 clip_top() const { return (draw_area_top >> 10) & 0x1FF; }
+    u32 clip_right() const { return draw_area_bottom & 0x3FF; }
+    u32 clip_bottom() const { return (draw_area_bottom >> 10) & 0x1FF; }
+    s32 offset_x() const;
+    s32 offset_y() const;
+
+    // The picture the video signal is carrying: the window into VRAM
+    // that GP1(05h) picks and GP1(08h) sizes. Nothing inside the
+    // machine depends on these — they exist so something outside it can
+    // put the picture on a screen.
+    u32 display_width() const;
+    u32 display_height() const;
+
+    struct Colour {
+        u8 r = 0;
+        u8 g = 0;
+        u8 b = 0;
+    };
+
+    // One pixel of that picture. Out-of-range coordinates read black
+    // rather than wrapping, since off the edge of the picture is not a
+    // place VRAM has an answer for.
+    Colour display_pixel(u32 x, u32 y) const;
 
     // The GPUREAD port. Returns transfer data while a VRAM-to-CPU copy
     // is in progress, and otherwise whatever GP1(10h) last asked for.
@@ -152,6 +182,14 @@ struct Gpu {
 
 private:
     void execute_gp0();
+
+    // Turning a collected command into the geometry the rasterizer
+    // takes. All the fiddly part of a GP0 drawing command is here: how
+    // many corners it has, which words carry colours and which carry
+    // texture coordinates, and where the palette and page hide.
+    void draw_polygon();
+    void draw_sprite();
+    Vertex vertex_at(u32 word) const;
 
     // Reads the destination and size words shared by both directions
     // of a VRAM copy.
