@@ -107,6 +107,15 @@ u32 Gpu::display_width() const
     return WIDTHS[display_mode & 3];
 }
 
+u32 Gpu::dot_cycles() const
+{
+    if (((display_mode >> 6) & 1) != 0) {
+        return 7;  // the 368-pixel mode, again out on its own
+    }
+    constexpr std::array<u32, 4> CYCLES = {10, 8, 5, 4};
+    return CYCLES[display_mode & 3];
+}
+
 u32 Gpu::display_height() const
 {
     // The taller mode only exists interlaced: it is the two fields

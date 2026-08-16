@@ -1,16 +1,23 @@
 #include "debugger.h"
 
 #include <algorithm>
+#include <array>
 #include <charconv>
 #include <format>
 #include <fstream>
+#include <optional>
 #include <sstream>
+#include <string_view>
+#include <utility>
 
+#include "cdrom.h"
 #include "console.h"
 #include "disasm.h"
 #include "dma.h"
 #include "gpu.h"
 #include "irq.h"
+#include "sio.h"
+#include "timers.h"
 
 namespace {
 
@@ -107,13 +114,79 @@ std::string format_registers(Console& console)
     return out;
 }
 
+// The controller's buttons by name, for the command that holds one
+// down. A held button is state rather than an event: the driver reads
+// the pad when it likes, so pressing one means leaving it pressed
+// until something says otherwise.
+const std::array<std::pair<std::string_view, Sio::Button>, 16> BUTTON_NAMES = {{
+    {"select", Sio::Button::Select},
+    {"l3", Sio::Button::L3},
+    {"r3", Sio::Button::R3},
+    {"start", Sio::Button::Start},
+    {"up", Sio::Button::Up},
+    {"right", Sio::Button::Right},
+    {"down", Sio::Button::Down},
+    {"left", Sio::Button::Left},
+    {"l2", Sio::Button::L2},
+    {"r2", Sio::Button::R2},
+    {"l1", Sio::Button::L1},
+    {"r1", Sio::Button::R1},
+    {"triangle", Sio::Button::Triangle},
+    {"circle", Sio::Button::Circle},
+    {"cross", Sio::Button::Cross},
+    {"square", Sio::Button::Square},
+}};
+
+std::optional<Sio::Button> find_button(std::string_view name)
+{
+    for (const auto& [text, button] : BUTTON_NAMES) {
+        if (text == name) {
+            return button;
+        }
+    }
+    return std::nullopt;
+}
+
+std::string button_names()
+{
+    std::string out;
+    for (const auto& [text, button] : BUTTON_NAMES) {
+        if (!out.empty()) {
+            out += ", ";
+        }
+        out += text;
+    }
+    return out;
+}
+
 std::string format_devices(Console& console)
 {
     const Gpu& gpu = console.bus.gpu;
     const Irq& irq = console.bus.irq;
     const Dma& dma = console.bus.dma;
+    const CdRom& cdrom = console.bus.cdrom;
 
     std::string out;
+    out += std::format("cdrom  stat {:02X}  int {:X}  enable {:02X}  "
+                       "queued {}  busy {}\n",
+                       cdrom.status,
+                       cdrom.interrupt_flag,
+                       cdrom.interrupt_enable,
+                       cdrom.queued,
+                       cdrom.busy ? "yes" : "no");
+    out += std::format("pad  buttons {:04X}\n", console.bus.sio.buttons);
+    for (u32 i = 0; i < Timers::COUNT; i++) {
+        const Timers::Timer& timer = console.bus.timers.timers[i];
+        if (timer.mode == 0 && timer.value == 0) {
+            continue;  // never set up; not worth a line
+        }
+        out +=
+            std::format("timer{}  value {:04X}  target {:04X}  mode {:04X}\n",
+                        i,
+                        timer.value,
+                        timer.target,
+                        timer.mode);
+    }
     out += std::format("irq  stat {:04X}  mask {:04X}  active {}\n",
                        irq.status,
                        irq.mask,
@@ -187,7 +260,8 @@ constexpr const char* HELP =
     "regs               the register file and COP0\n"
     "disas [addr] [n]   disassemble n instructions (default at pc)\n"
     "mem <addr> [n]     dump n words\n"
-    "dev                device state: irq, gpu, dma\n"
+    "dev                device state: irq, gpu, dma, cdrom, pad, timers\n"
+    "pad <down|up> <button>   hold a controller button, or let go\n"
     "trace [n]          the last n instructions retired\n"
     "tracing <on|off>   record the instruction trace\n"
     "profile <n> [top]  run n instructions, then the busiest addresses\n"
@@ -484,6 +558,26 @@ std::string Debugger::execute(Console& console, const std::string& line)
 
     if (command == "dev") {
         return format_devices(console);
+    }
+
+    if (command == "pad") {
+        if (words.size() < 3) {
+            return "pad needs down or up, and a button name\n";
+        }
+        const bool down = words[1] == "down";
+        if (!down && words[1] != "up") {
+            return "pad takes down or up\n";
+        }
+        const auto button = find_button(words[2]);
+        if (!button) {
+            return "no such button; try " + button_names() + "\n";
+        }
+        if (down) {
+            console.bus.sio.press(*button);
+        } else {
+            console.bus.sio.release(*button);
+        }
+        return std::format("buttons {:04X}\n", console.bus.sio.buttons);
     }
 
     if (command == "disas") {

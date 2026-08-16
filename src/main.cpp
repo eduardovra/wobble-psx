@@ -13,8 +13,57 @@
 #include "console.h"
 #include "disasm.h"
 #include "gpu.h"
+#include "sio.h"
 
 namespace {
+
+// The keyboard as a controller. The face buttons are laid out the way
+// they sit on the pad rather than by name, so the shape on screen is
+// the shape under the fingers.
+struct PadKey {
+    SDL_Keycode key;
+    Sio::Button button;
+};
+
+constexpr std::array<PadKey, 14> PAD_KEYS = {{
+    {SDLK_UP, Sio::Button::Up},
+    {SDLK_DOWN, Sio::Button::Down},
+    {SDLK_LEFT, Sio::Button::Left},
+    {SDLK_RIGHT, Sio::Button::Right},
+    {SDLK_RETURN, Sio::Button::Start},
+    {SDLK_RSHIFT, Sio::Button::Select},
+    {SDLK_X, Sio::Button::Cross},
+    {SDLK_Z, Sio::Button::Square},
+    {SDLK_S, Sio::Button::Circle},
+    {SDLK_A, Sio::Button::Triangle},
+    {SDLK_Q, Sio::Button::L1},
+    {SDLK_W, Sio::Button::L2},
+    {SDLK_E, Sio::Button::R1},
+    {SDLK_R, Sio::Button::R2},
+}};
+
+void handle_pad_key(Sio& sio, const SDL_Event& event)
+{
+    const bool down = event.type == SDL_EVENT_KEY_DOWN;
+    if (!down && event.type != SDL_EVENT_KEY_UP) {
+        return;
+    }
+    // A key the debugger UI is using is not a button press.
+    if (ImGui::GetIO().WantCaptureKeyboard) {
+        return;
+    }
+    for (const PadKey& mapping : PAD_KEYS) {
+        if (mapping.key != event.key.key) {
+            continue;
+        }
+        if (down) {
+            sio.press(mapping.button);
+        } else {
+            sio.release(mapping.button);
+        }
+        return;
+    }
+}
 
 // Emulated time to run per host frame. The renderer is vsynced to
 // 60 Hz, so running one sixtieth of a second of console time per pass
@@ -292,6 +341,7 @@ int main(int argc, char** argv)
             if (event.type == SDL_EVENT_QUIT) {
                 running = false;
             }
+            handle_pad_key(console.bus.sio, event);
         }
 
         if (emu_running) {

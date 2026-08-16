@@ -4,6 +4,7 @@
 #include <string>
 
 #include "bus.h"
+#include "gte.h"
 #include "types.h"
 
 struct State;
@@ -76,6 +77,11 @@ struct Cpu {
     // cause_register(), which is what software reads.
     u32 cause = 0;
 
+    // Coprocessor 2, the geometry engine. It is part of the CPU in the
+    // same sense COP0 is: reached only through this instruction set,
+    // and holding no state the rest of the machine can see.
+    Gte gte;
+
     // whether the instruction being executed sits in a branch delay
     // slot (an exception there must report the branch's address)
     bool in_delay_slot = false;
@@ -86,6 +92,13 @@ struct Cpu {
     // no-op anyway, so it needs no separate flag.
     u32 load_reg = 0;
     u32 load_value = 0;
+
+    // What the instruction being executed cost beyond issuing it and
+    // its memory accesses. Only the geometry engine sets it: one of
+    // its operations runs for tens of cycles inside the instruction
+    // that started it. Cleared at the top of every step, so it is
+    // never state a save has to carry.
+    u32 coprocessor_cycles = 0;
 
     // Set when execution hits something unimplemented or invalid.
     // The emulator stops rather than silently running wrong code.
@@ -117,6 +130,7 @@ private:
     void execute(u32 instr);
     void execute_special(u32 instr);
     void execute_cop0(u32 instr);
+    void execute_cop2(u32 instr);
 
     // Jumps to the exception vector, saving the return address in epc.
     void raise_exception(Exception code);

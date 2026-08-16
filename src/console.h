@@ -16,9 +16,12 @@ struct State;
 // and none of them has to know that a scanline event has to be
 // dispatched or that the CPU may only run as far as the next deadline.
 struct Console {
-    Bus bus;
-    Cpu cpu{bus};
+    // The clock is declared first because the bus is built around it:
+    // a device asked for its state has to answer for the instant it
+    // was asked, so the read paths need the time.
     Scheduler scheduler;
+    Bus bus{scheduler};
+    Cpu cpu{bus};
 
     // Frames completed since reset. Not hardware state — the console
     // does not count its own frames — but the cheapest way to say how

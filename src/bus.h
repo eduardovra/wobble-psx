@@ -5,9 +5,13 @@
 #include <string>
 #include <unordered_set>
 
+#include "cdrom.h"
 #include "dma.h"
 #include "gpu.h"
 #include "irq.h"
+#include "scheduler.h"
+#include "sio.h"
+#include "timers.h"
 #include "types.h"
 
 struct Debugger;
@@ -23,11 +27,18 @@ struct State;
 //   0x1F801000  8 KB   hardware registers — GPU, SPU, DMA, timers…
 //   0x1FC00000  512 KB BIOS ROM
 //
-// So far RAM, the BIOS, the interrupt controller, the GPU's ports and
-// the DMA controller are real; the rest of the register range reads as
-// zero and swallows writes, which is enough to get the BIOS booting.
-// The scratchpad is among the missing — nothing has asked for it yet.
+// So far RAM, the BIOS, the interrupt controller, the GPU's ports, the
+// DMA controller, the CD-ROM and the controller port are real; the rest
+// of the register range reads as zero and swallows writes, which is
+// enough to get the BIOS booting. The scratchpad is among the missing —
+// nothing has asked for it yet.
 struct Bus {
+    // The clock comes in from outside because the bus does not own it:
+    // the CPU drives it forward, and the devices behind here are timed
+    // against it. A counter software reads has to answer for the
+    // instant of the read, which means the read path needs the time.
+    explicit Bus(Scheduler& scheduler) : scheduler(scheduler) { }
+
     static constexpr u32 RAM_SIZE = 2 * 1024 * 1024;
     static constexpr u32 BIOS_SIZE = 512 * 1024;
 
@@ -104,9 +115,14 @@ struct Bus {
     std::array<u8, RAM_SIZE> ram{};
     std::array<u8, BIOS_SIZE> bios{};
 
+    Scheduler& scheduler;
+
     Irq irq;
     Gpu gpu;
     Dma dma;
+    CdRom cdrom;
+    Sio sio;
+    Timers timers;
 
     // Bounded by the number of distinct unhandled addresses a game
     // actually touches, which is small.

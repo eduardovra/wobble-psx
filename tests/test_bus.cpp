@@ -3,6 +3,7 @@
 #include <doctest/doctest.h>
 
 #include "bus.h"
+#include "machine.h"
 
 namespace {
 
@@ -13,7 +14,7 @@ constexpr u32 UNMAPPED = 0x1F900000;
 
 TEST_CASE("an unhandled address is reported once, however often it is hit")
 {
-    const auto bus = std::make_unique<Bus>();
+    const LooseBus bus;
 
     CHECK(bus->note_unhandled(UNMAPPED));
     CHECK_FALSE(bus->note_unhandled(UNMAPPED));
@@ -25,7 +26,7 @@ TEST_CASE("an unhandled address is reported once, however often it is hit")
 
 TEST_CASE("a read and a write to one register are one missing device")
 {
-    const auto bus = std::make_unique<Bus>();
+    const LooseBus bus;
 
     bus->read32(UNMAPPED);
     CHECK_FALSE(bus->note_unhandled(UNMAPPED));
@@ -36,7 +37,7 @@ TEST_CASE("a read and a write to one register are one missing device")
 
 TEST_CASE("KUSEG, KSEG0 and KSEG1 are windows onto the same RAM")
 {
-    const auto bus = std::make_unique<Bus>();
+    const LooseBus bus;
     bus->write32(0x00001000, 0xDEADBEEF);
 
     CHECK(bus->read32(0x00001000) == 0xDEADBEEF);  // KUSEG
@@ -50,7 +51,7 @@ TEST_CASE("KUSEG, KSEG0 and KSEG1 are windows onto the same RAM")
 
 TEST_CASE("memory is little-endian")
 {
-    const auto bus = std::make_unique<Bus>();
+    const LooseBus bus;
     bus->write32(0x00001000, 0x12345678);
 
     CHECK(bus->read8(0x00001000) == 0x78);
@@ -60,7 +61,7 @@ TEST_CASE("memory is little-endian")
 
 TEST_CASE("an absent expansion device reads as all ones")
 {
-    const auto bus = std::make_unique<Bus>();
+    const LooseBus bus;
 
     CHECK(bus->read8(0x1F000000) == 0xFF);
 }

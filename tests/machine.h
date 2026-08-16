@@ -5,6 +5,21 @@
 
 #include "bus.h"
 #include "cpu.h"
+#include "scheduler.h"
+
+// A bus with a clock of its own. Bus is built around a Scheduler
+// because a device asked for its state has to answer for the instant
+// it was asked; a test wanting one device rather than a whole console
+// still has to supply one. It also holds the bus by pointer, because
+// two and a half megabytes of arrays is too much for the stack a test
+// runs on.
+struct LooseBus {
+    Scheduler scheduler;
+    std::unique_ptr<Bus> bus = std::make_unique<Bus>(scheduler);
+
+    Bus& operator*() const { return *bus; }
+    Bus* operator->() const { return bus.get(); }
+};
 
 // A CPU with RAM behind it, running a short program assembled into
 // RAM. Nothing here touches the BIOS, so the tests need no ROM image
@@ -13,9 +28,7 @@ struct Machine {
     static constexpr u32 CODE = 0x00001000;
     static constexpr u32 DATA = 0x00002000;
 
-    // Bus is two and a half megabytes of arrays, too big for the
-    // stack a test runs on.
-    std::unique_ptr<Bus> bus = std::make_unique<Bus>();
+    LooseBus bus;
     Cpu cpu{*bus};
 
     // Places a program at CODE and points the CPU at it, replacing

@@ -110,6 +110,13 @@ struct DrawState {
     u32 clut_x = 0;
     u32 clut_y = 0;
 
+    // The texture window, which folds a coordinate back into a
+    // rectangle smaller than the page. Both parts are in texels.
+    u32 window_mask_x = 0;
+    u32 window_mask_y = 0;
+    u32 window_offset_x = 0;
+    u32 window_offset_y = 0;
+
     u32 blend_mode = 0;
     bool check_mask = false;
     u16 set_mask = 0;
@@ -135,6 +142,15 @@ DrawState prepare(const Gpu& gpu, const Shading& how)
     state.clut_x = (how.clut & 0x3F) * 16;
     state.clut_y = (how.clut >> 6) & 0x1FF;
 
+    // GP0(E2h). The four fields are in units of eight texels, which is
+    // why nothing here divides: they are shifted up into texels once,
+    // and the mask is used as a mask rather than as a size.
+    constexpr u32 WINDOW_STEP = 8;
+    state.window_mask_x = (gpu.texture_window & 0x1F) * WINDOW_STEP;
+    state.window_mask_y = ((gpu.texture_window >> 5) & 0x1F) * WINDOW_STEP;
+    state.window_offset_x = ((gpu.texture_window >> 10) & 0x1F) * WINDOW_STEP;
+    state.window_offset_y = ((gpu.texture_window >> 15) & 0x1F) * WINDOW_STEP;
+
     state.check_mask = (gpu.mask_setting & 2) != 0;
     state.set_mask = (gpu.mask_setting & 1) != 0 ? MASK_BIT : 0;
     return state;
@@ -145,11 +161,20 @@ DrawState prepare(const Gpu& gpu, const Shading& how)
 // and whether it blends — survives to the caller.
 u16 sample(const Gpu& gpu, const DrawState& state, u32 u, u32 v)
 {
-    const u32 y = (state.texture_y + (v & 0xFF)) % Gpu::VRAM_HEIGHT;
+    // The window first: clearing the masked bits and forcing the
+    // offset into them makes a texture smaller than a page repeat
+    // across one, which is how a tiled surface is drawn without
+    // storing the tile more than once.
+    u = ((u & 0xFF) & ~state.window_mask_x) |
+        (state.window_offset_x & state.window_mask_x);
+    v = ((v & 0xFF) & ~state.window_mask_y) |
+        (state.window_offset_y & state.window_mask_y);
+
+    const u32 y = (state.texture_y + v) % Gpu::VRAM_HEIGHT;
     const std::size_t row = std::size_t{y} * Gpu::VRAM_WIDTH;
 
     if (state.depth >= 2) {
-        const u32 x = (state.texture_x + (u & 0xFF)) % Gpu::VRAM_WIDTH;
+        const u32 x = (state.texture_x + u) % Gpu::VRAM_WIDTH;
         return gpu.vram[row + x];
     }
 
@@ -158,8 +183,8 @@ u16 sample(const Gpu& gpu, const DrawState& state, u32 u, u32 v)
     // colour. Index zero is transparent, whatever the palette says.
     const u32 per_pixel = state.depth == 0 ? 4u : 2u;
     const u32 bits = 16 / per_pixel;
-    const u32 x = (state.texture_x + (u & 0xFF) / per_pixel) % Gpu::VRAM_WIDTH;
-    const u32 shift = ((u & 0xFF) % per_pixel) * bits;
+    const u32 x = (state.texture_x + u / per_pixel) % Gpu::VRAM_WIDTH;
+    const u32 shift = (u % per_pixel) * bits;
     const u32 index = (gpu.vram[row + x] >> shift) & ((1u << bits) - 1);
 
     const u32 clut_x = (state.clut_x + index) % Gpu::VRAM_WIDTH;

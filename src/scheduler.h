@@ -22,6 +22,22 @@ enum class EventKind : u32 {
     // whichever scanline the GPU says begins it.
     Hblank,
 
+    // The drive's heartbeat. Unlike the video signal it has nothing to
+    // do at most of them: it is a mechanism running to its own timing,
+    // and this is how often the rest of the machine looks to see
+    // whether it has finished what it was asked.
+    CdRom,
+
+    // The root counters being brought up to date. They work out their
+    // own value whenever one is read, so this exists only so a target
+    // they pass unread still raises its interrupt on time.
+    Timers,
+
+    // A controller acknowledging the byte it was just sent. Unlike the
+    // others this is scheduled when it is needed and not repeated:
+    // there is nothing to wake up for until something is said.
+    Sio,
+
     Count,  // sentinel: number of kinds, never a real event
 };
 

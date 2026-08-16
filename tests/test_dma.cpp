@@ -4,6 +4,7 @@
 
 #include "bus.h"
 #include "dma.h"
+#include "machine.h"
 
 namespace {
 
@@ -39,7 +40,7 @@ void write_ram(Bus& bus, u32 address, u32 value)
 
 TEST_CASE("a channel runs only when both it and DPCR say so")
 {
-    const auto bus = std::make_unique<Bus>();
+    const LooseBus bus;
     bus->write32(madr(OTC_CHANNEL), SCRATCH);
     bus->write32(bcr(OTC_CHANNEL), 4);
 
@@ -67,7 +68,7 @@ TEST_CASE("a channel runs only when both it and DPCR say so")
 
 TEST_CASE("the ordering table channel chains backwards to a terminator")
 {
-    const auto bus = std::make_unique<Bus>();
+    const LooseBus bus;
     bus->write32(DPCR, ALL_CHANNELS_ENABLED);
 
     // Four entries, built downwards from SCRATCH.
@@ -87,7 +88,7 @@ TEST_CASE("the ordering table channel chains backwards to a terminator")
 
 TEST_CASE("a block transfer hands every word to the GPU")
 {
-    const auto bus = std::make_unique<Bus>();
+    const LooseBus bus;
     bus->write32(DPCR, ALL_CHANNELS_ENABLED);
 
     // An image transfer into VRAM: three words of command, then one
@@ -107,7 +108,7 @@ TEST_CASE("a block transfer hands every word to the GPU")
 
 TEST_CASE("a linked list follows its chain until the end marker")
 {
-    const auto bus = std::make_unique<Bus>();
+    const LooseBus bus;
     bus->write32(DPCR, ALL_CHANNELS_ENABLED);
 
     // Two packets, the second not adjacent to the first, so only the
@@ -131,7 +132,7 @@ TEST_CASE("a linked list follows its chain until the end marker")
 
 TEST_CASE("an empty linked-list packet still advances the chain")
 {
-    const auto bus = std::make_unique<Bus>();
+    const LooseBus bus;
     bus->write32(DPCR, ALL_CHANNELS_ENABLED);
 
     const u32 second = SCRATCH + 0x100;
@@ -151,7 +152,7 @@ TEST_CASE("an empty linked-list packet still advances the chain")
 
 TEST_CASE("a request transfer moves blocksize times block count")
 {
-    const auto bus = std::make_unique<Bus>();
+    const LooseBus bus;
     bus->write32(DPCR, ALL_CHANNELS_ENABLED);
 
     write_ram(*bus, SCRATCH + 0, 0xA0000000);
@@ -169,7 +170,7 @@ TEST_CASE("a request transfer moves blocksize times block count")
 
 TEST_CASE("a completed channel interrupts only when it is allowed to")
 {
-    const auto bus = std::make_unique<Bus>();
+    const LooseBus bus;
     bus->write32(DPCR, ALL_CHANNELS_ENABLED);
     bus->irq.mask = 1u << static_cast<u32>(Interrupt::Dma);
 
@@ -211,7 +212,7 @@ TEST_CASE("a completed channel interrupts only when it is allowed to")
 
 TEST_CASE("a DICR flag is acknowledged by writing a one to it")
 {
-    const auto bus = std::make_unique<Bus>();
+    const LooseBus bus;
     bus->write32(DPCR, ALL_CHANNELS_ENABLED);
     constexpr u32 MASTER_ENABLE = 1u << 23;
     const u32 flag = 1u << (24 + OTC_CHANNEL);
@@ -235,7 +236,7 @@ TEST_CASE("a DICR flag is acknowledged by writing a one to it")
 
 TEST_CASE("forcing the interrupt needs neither a flag nor an enable")
 {
-    const auto bus = std::make_unique<Bus>();
+    const LooseBus bus;
     constexpr u32 FORCE = 1u << 15;
 
     CHECK((bus->read32(DICR) & (1u << 31)) == 0);
@@ -245,7 +246,7 @@ TEST_CASE("forcing the interrupt needs neither a flag nor an enable")
 
 TEST_CASE("the controller registers read back what was written")
 {
-    const auto bus = std::make_unique<Bus>();
+    const LooseBus bus;
 
     // DPCR powers up with priorities set and every channel disabled.
     CHECK(bus->read32(DPCR) == 0x07654321);

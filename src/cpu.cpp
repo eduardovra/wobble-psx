@@ -106,6 +106,7 @@ void Cpu::visit_state(State& state)
     state(halted);
     state(halt_reason);
     state(tty);
+    gte.visit_state(state);
 }
 
 void Cpu::reset()
@@ -125,8 +126,10 @@ void Cpu::reset()
     branching = false;
     load_reg = 0;
     load_value = 0;
+    coprocessor_cycles = 0;
     halted = false;
     halt_reason.clear();
+    gte.reset();
 }
 
 u32 Cpu::step()
@@ -137,6 +140,7 @@ u32 Cpu::step()
 
     current_pc = pc;
     bus.stall_cycles = 0;
+    coprocessor_cycles = 0;
 
     // The BIOS exposes its kernel calls as jumps to fixed addresses,
     // with the function number in $t1. Watching for the putchar calls
@@ -192,7 +196,7 @@ u32 Cpu::step()
     // Writes made by this instruction become readable from here on.
     regs = out_regs;
 
-    return CYCLES_PER_INSTRUCTION + bus.stall_cycles;
+    return CYCLES_PER_INSTRUCTION + bus.stall_cycles + coprocessor_cycles;
 }
 
 void Cpu::set_reg(u32 index, u32 value)
@@ -380,6 +384,9 @@ void Cpu::execute(u32 instr)
     case 0x10:
         execute_cop0(instr);
         break;
+    case 0x12:
+        execute_cop2(instr);
+        break;
 
     // Loads and stores, the only instructions that touch memory. All
     // of them address as register + sign-extended offset. Loads take
@@ -510,6 +517,30 @@ void Cpu::execute(u32 instr)
         const u32 shift = (addr & 3) * 8;
         const u32 kept = bus.read32(aligned) & ~(ALL_ONES << shift);
         bus.write32(aligned, kept | (reg(rt(instr)) << shift));
+        break;
+    }
+    // The geometry engine's own load and store. They exist because a
+    // vertex is loaded and a screen coordinate stored more often than
+    // anything else a program does, and going through a general
+    // register would double the instruction count. Unlike MFC2 there
+    // is no load delay: the value lands in a coprocessor register, not
+    // in one the next instruction might read.
+    case 0x32: {  // LWC2
+        const u32 addr = reg(rs(instr)) + imm_se(instr);
+        if (addr % 4 != 0) {
+            raise_address_error(Exception::AddressLoad, addr);
+            break;
+        }
+        gte.write_data(rt(instr), bus.read32(addr));
+        break;
+    }
+    case 0x3A: {  // SWC2
+        const u32 addr = reg(rs(instr)) + imm_se(instr);
+        if (addr % 4 != 0) {
+            raise_address_error(Exception::AddressStore, addr);
+            break;
+        }
+        bus.write32(addr, gte.read_data(rt(instr)));
         break;
     }
     default:
@@ -740,6 +771,37 @@ void Cpu::execute_cop0(u32 instr)
         break;
     default:
         halt(std::format("unhandled COP0 {:08X} at {:08X}", instr, current_pc));
+        break;
+    }
+}
+
+// Opcode 0x12 reaches coprocessor 2, the geometry engine. Bit 25
+// separates the two halves of the encoding: with it clear the
+// instruction moves a register in or out, and with it set the whole
+// low half of the word is a geometry operation's own encoding.
+void Cpu::execute_cop2(u32 instr)
+{
+    constexpr u32 OPERATION_BIT = 1 << 25;
+    if ((instr & OPERATION_BIT) != 0) {
+        coprocessor_cycles += gte.execute(instr);
+        return;
+    }
+
+    switch (rs(instr)) {
+    case 0x00:  // MFC2 (value arrives via the load delay slot)
+        schedule_load(rt(instr), gte.read_data(rd(instr)));
+        break;
+    case 0x02:  // CFC2
+        schedule_load(rt(instr), gte.read_control(rd(instr)));
+        break;
+    case 0x04:  // MTC2
+        gte.write_data(rd(instr), reg(rt(instr)));
+        break;
+    case 0x06:  // CTC2
+        gte.write_control(rd(instr), reg(rt(instr)));
+        break;
+    default:
+        halt(std::format("unhandled COP2 {:08X} at {:08X}", instr, current_pc));
         break;
     }
 }

@@ -3,6 +3,19 @@
 A PlayStation 1 emulator, named after the console's famously wobbly
 vertex graphics.
 
+It boots the retail BIOS to its shell — the main menu, with the memory
+card and CD player entries, drawn and responding to the controller. No
+disc can be put in the drive yet, which is the state the BIOS reads as
+"no game", and why the shell is as far as it goes.
+
+## Controls
+
+The keyboard is the controller in the first socket: the arrow keys are
+the d-pad, `X` `S` `Z` `A` are cross, circle, square and triangle,
+`Q` `W` `E` `R` are the shoulder buttons, and Enter and right shift are
+start and select. The second socket is empty, and so is every memory
+card slot.
+
 ## Building
 
 Requires CMake ≥ 3.24 and a C++20 compiler. SDL3 and Dear ImGui are
@@ -43,10 +56,19 @@ written against the emulator.
 
 `help` lists the commands. Briefly: `run`/`runc`/`frames`/`until` move
 the machine, `break` and `watch` stop it, `regs`/`mem`/`disas`/`dev`
-look at it, `trace` shows the last instructions retired, `profile`
-reports where the time and the memory accesses went, `screen` writes
-what the display is showing as a PPM, and `save`/`load` take snapshots.
-Numbers are hex unless prefixed with `#`.
+look at it, `pad` holds a controller button down, `trace` shows the last
+instructions retired, `profile` reports where the time and the memory
+accesses went, `screen` writes what the display is showing as a PPM, and
+`save`/`load` take snapshots. Numbers are hex unless prefixed with `#`.
+
+So the shell can be driven without a window, which is how the controller
+is tested:
+
+```sh
+./build-rel/wobble-dbg SCPH1001.BIN -c "frames #2400" \
+    -c "pad down down" -c "frames #10" -c "pad up down" \
+    -c "frames #40" -c "screen menu.ppm"
+```
 
 So the picture the machine is producing can be had without a window:
 
@@ -154,6 +176,13 @@ that are easy to get subtly wrong: the load and branch delay slots,
 what an exception records, the scheduler's timekeeping, what each
 instruction costs the clock, and the handshake between a device raising
 an interrupt and the CPU taking it.
+
+The devices are tested through the bus rather than by calling into
+them, so the register decode and the banking are part of what is
+checked. Timing is part of it too, and not incidentally: an answer that
+arrives too early is as wrong as one that never comes, since a driver
+that clears an interrupt after asking for it will throw away one
+delivered inside its own store.
 
 Validating the interpreter against a real test ROM is tracked in
 [issue #1](https://github.com/eduardovra/wobble-psx/issues/1).

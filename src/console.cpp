@@ -2,9 +2,11 @@
 
 #include <algorithm>
 
+#include "cdrom.h"
 #include "gpu.h"
 #include "irq.h"
 #include "savestate.h"
+#include "timers.h"
 
 void Console::reset()
 {
@@ -12,9 +14,14 @@ void Console::reset()
     bus.irq.reset();
     bus.gpu.reset();
     bus.dma.reset();
+    bus.cdrom.reset();
+    bus.sio.reset();
+    bus.timers.reset();
     scheduler.reset();
     frames = 0;
     scheduler.schedule_in(EventKind::Hblank, Gpu::CYCLES_PER_SCANLINE);
+    scheduler.schedule_in(EventKind::CdRom, CdRom::TICK_CYCLES);
+    scheduler.schedule_in(EventKind::Timers, Timers::TICK_CYCLES);
 }
 
 void Console::dispatch_due_events()
@@ -37,6 +44,23 @@ void Console::dispatch_due_events()
             // deadline rather than from now keeps it exactly on rate.
             scheduler.schedule_at(EventKind::Hblank,
                                   event->deadline + Gpu::CYCLES_PER_SCANLINE);
+            break;
+        case EventKind::CdRom:
+            if (bus.cdrom.tick(CdRom::TICK_CYCLES)) {
+                bus.irq.raise(Interrupt::CdRom);
+            }
+            scheduler.schedule_at(EventKind::CdRom,
+                                  event->deadline + CdRom::TICK_CYCLES);
+            break;
+        case EventKind::Sio:
+            if (bus.sio.deliver_acknowledge()) {
+                bus.irq.raise(Interrupt::Controller);
+            }
+            break;
+        case EventKind::Timers:
+            bus.timers.advance(scheduler.now, bus.gpu, bus.irq);
+            scheduler.schedule_at(EventKind::Timers,
+                                  event->deadline + Timers::TICK_CYCLES);
             break;
         case EventKind::Count:
             break;  // sentinel, never returned

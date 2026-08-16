@@ -49,6 +49,7 @@ target_link_libraries(imgui PUBLIC SDL3::SDL3)
 # library, so the tests can link it without a window system.
 add_library(core STATIC
     src/bus.cpp
+    src/cdrom.cpp
     src/console.cpp
     src/cpu.cpp
     src/debugger.cpp
@@ -56,11 +57,14 @@ add_library(core STATIC
     src/dma.cpp
     src/gdbstub.cpp
     src/gpu.cpp
+    src/gte.cpp
     src/irq.cpp
     src/log.cpp
     src/raster.cpp
     src/savestate.cpp
     src/scheduler.cpp
+    src/sio.cpp
+    src/timers.cpp
 )
 target_include_directories(core PUBLIC src)
 
@@ -75,15 +79,19 @@ target_link_libraries(wobble-dbg PRIVATE core)
 add_executable(tests
     tests/main.cpp
     tests/test_bus.cpp
+    tests/test_cdrom.cpp
     tests/test_cpu.cpp
     tests/test_debugger.cpp
     tests/test_disasm.cpp
     tests/test_dma.cpp
     tests/test_gdbstub.cpp
     tests/test_gpu.cpp
+    tests/test_gte.cpp
     tests/test_irq.cpp
     tests/test_raster.cpp
     tests/test_scheduler.cpp
+    tests/test_sio.cpp
+    tests/test_timers.cpp
     tests/test_timing.cpp
 )
 target_link_libraries(tests PRIVATE core doctest::doctest)

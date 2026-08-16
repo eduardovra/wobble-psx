@@ -91,6 +91,12 @@ struct Gpu {
     u32 display_width() const;
     u32 display_height() const;
 
+    // How many of the GPU's own cycles one pixel of the display lasts.
+    // A wider mode clocks pixels out faster, so this falls as the
+    // width rises. Timer 0 can be told to count in these rather than
+    // in CPU cycles, which is the only reason it is public.
+    u32 dot_cycles() const;
+
     struct Colour {
         u8 r = 0;
         u8 g = 0;

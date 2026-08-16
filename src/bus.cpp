@@ -108,6 +108,9 @@ void Bus::visit_state(State& state)
     irq.visit_state(state);
     gpu.visit_state(state);
     dma.visit_state(state);
+    cdrom.visit_state(state);
+    sio.visit_state(state);
+    timers.visit_state(state);
 }
 
 bool Bus::read_io(u32 phys, u32& value)
@@ -131,6 +134,21 @@ bool Bus::read_io(u32 phys, u32& value)
 
     if (phys >= Dma::BASE && phys < Dma::END) {
         value = dma.read_register(phys);
+        return true;
+    }
+    // The CD-ROM controller's four registers are bytes rather than
+    // words, so each address in its range is its own register and the
+    // access width does not come into it.
+    if (phys >= CdRom::BASE && phys < CdRom::END) {
+        value = cdrom.read_register(phys);
+        return true;
+    }
+    if (phys >= Sio::BASE && phys < Sio::END) {
+        value = sio.read_register(phys);
+        return true;
+    }
+    if (phys >= Timers::BASE && phys < Timers::END) {
+        value = timers.read_register(phys, scheduler.now, gpu, irq);
         return true;
     }
     return false;
@@ -168,6 +186,25 @@ bool Bus::write_io(u32 phys, u32 value)
             // on the scheduler rather than all at once here.
             run_dma(*this, channel);
         }
+        return true;
+    }
+    if (phys >= CdRom::BASE && phys < CdRom::END) {
+        cdrom.write_register(phys, static_cast<u8>(value));
+        return true;
+    }
+    if (phys >= Sio::BASE && phys < Sio::END) {
+        // A byte written to the port is shifted out and the device's
+        // answer shifted back inside the same store; the acknowledge
+        // that follows is a separate event, and has to be, because the
+        // driver clears the last one in between.
+        if (sio.write_register(phys, value)) {
+            scheduler.schedule_at(EventKind::Sio,
+                                  scheduler.now + sio.acknowledge_delay());
+        }
+        return true;
+    }
+    if (phys >= Timers::BASE && phys < Timers::END) {
+        timers.write_register(phys, value, scheduler.now, gpu, irq);
         return true;
     }
     return false;
