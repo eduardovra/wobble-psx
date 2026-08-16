@@ -54,6 +54,7 @@ add_library(core STATIC
     src/debugger.cpp
     src/disasm.cpp
     src/dma.cpp
+    src/gdbstub.cpp
     src/gpu.cpp
     src/irq.cpp
     src/log.cpp
@@ -78,6 +79,7 @@ add_executable(tests
     tests/test_debugger.cpp
     tests/test_disasm.cpp
     tests/test_dma.cpp
+    tests/test_gdbstub.cpp
     tests/test_gpu.cpp
     tests/test_irq.cpp
     tests/test_raster.cpp

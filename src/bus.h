@@ -1,6 +1,7 @@
 #pragma once
 
 #include <array>
+#include <optional>
 #include <string>
 #include <unordered_set>
 
@@ -62,6 +63,14 @@ struct Bus {
     void write8(u32 addr, u8 value);
     void write16(u32 addr, u16 value);
     void write32(u32 addr, u32 value);
+
+    // Side-effect-free accessors for a debugger looking at memory.
+    // Reading a hardware register is an event the device reacts to,
+    // so a debugger must never do it by accident — these answer only
+    // for RAM and the BIOS, and refuse everything else rather than
+    // guess. Writes reach RAM alone; the BIOS is ROM.
+    std::optional<u8> peek8(u32 addr) const;
+    bool poke8(u32 addr, u8 value);
 
     // Decode of the hardware register range, shared by all three
     // access widths. Returns whether a device claimed the address,

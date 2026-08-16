@@ -264,6 +264,28 @@ u8 Bus::read8(u32 addr)
     return 0;
 }
 
+std::optional<u8> Bus::peek8(u32 addr) const
+{
+    const u32 phys = to_physical(addr);
+    if (phys < RAM_SIZE) {
+        return ram[phys];
+    }
+    if (phys >= BIOS_START && phys < BIOS_START + BIOS_SIZE) {
+        return bios[phys - BIOS_START];
+    }
+    return std::nullopt;
+}
+
+bool Bus::poke8(u32 addr, u8 value)
+{
+    const u32 phys = to_physical(addr);
+    if (phys < RAM_SIZE) {
+        ram[phys] = value;
+        return true;
+    }
+    return false;
+}
+
 void Bus::write32(u32 addr, u32 value)
 {
     if (debug != nullptr) {

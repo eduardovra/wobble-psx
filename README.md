@@ -62,6 +62,84 @@ The Release build matters here too, and for the same reason: getting
 past the kernel's startup takes tens of millions of instructions, which
 the sanitisers turn from seconds into minutes.
 
+## The GDB stub
+
+`--gdb` serves the GDB remote protocol on loopback instead of reading
+commands, so gdb — and anything that drives gdb, such as VS Code — can
+debug the emulated CPU:
+
+```sh
+./build-rel/wobble-dbg SCPH1001.BIN --gdb 3333
+gdb-multiarch -ex "target remote 127.0.0.1:3333"
+```
+
+The stub says what machine it is when asked, so no `set architecture`
+is needed anywhere. That is not a convenience: a frontend that
+connects first and runs its configuration afterwards would otherwise
+read the register file as some other machine's and show a pc of zero.
+
+Any `-c` commands run before the stub starts listening, so a session
+can be set up first — run to an address, load a save state — and then
+handed to gdb. Breakpoints and watchpoints are the debugger's own,
+shared with the text commands; memory reads answer only for RAM and
+the BIOS, because reading a hardware register is an event the device
+reacts to and gdb reads memory constantly.
+
+For VS Code, the [Native Debug][native-debug] extension plus a
+`.vscode` configuration make it one key: F5 builds the release tree,
+makes sure a stub is listening, waits for it, and attaches. The
+launch configuration, the task that starts the stub and the script it
+runs are in `.vscode/`, which a global gitignore keeps out of the
+repository — so they are per-checkout unless force-added.
+
+There are three configurations. "disassembly" is the one to step with;
+"run and attach" does the build-and-start above; and "attach to
+running stub" skips the building and starting entirely, for a stub
+already listening — one the task left behind, or one launched by hand
+with its own `-c` setup.
+
+Stepping needs a word of explanation, because it does not work on ROM
+code by default. Stepping by source line means asking gdb where the
+current line ends, and a BIOS carries no line numbers to answer with,
+so it refuses: "cannot find bounds of current function", which a
+frontend reports as a failed step.
+
+What it will do is step to the end of the function it is in, and a
+function four bytes long is left by executing exactly one instruction.
+So `tools/make-bios-elf.py` gives every instruction its own four-byte
+function symbol, and the ordinary step buttons become instruction
+stepping. The one surprise is that a call is stepped into rather than
+over, since arriving at the callee also counts as leaving. The
+"disassembly" configuration additionally has VS Code's Disassembly
+View (right-click in the editor to show it), which is worth having
+open while stepping.
+
+The same script is what gives the debugger a file to open at all: the
+ROM bytes unchanged, with a header saying they load at `0xBFC00000` on
+a MIPS I, and named frames in place of `?? ()`. Homebrew built with
+real symbols needs none of it and steps by source in the ordinary way.
+The task generates the file, so it is only worth running by hand to
+look at:
+
+```sh
+python3 tools/make-bios-elf.py SCPH1001.BIN build-rel/bios.elf
+```
+
+A stub that is already up is reused rather than restarted, because
+detaching leaves the machine exactly where it was — so gdb can come
+and go, and F5 lands back in the same boot instead of starting it
+over. The "restart gdb stub" task is there for when a fresh machine
+is what is wanted. Nothing else on the port is ever touched: if
+something that is not the stub holds 3333, the launch stops and says
+so rather than killing a process for standing on a number.
+
+Retail games and the BIOS are raw binaries, so gdb debugs them at the
+assembly level; a homebrew ELF built with symbols gets source-level
+stepping by adding it to gdb with `file` (or `executable` in the
+config above).
+
+[native-debug]: https://marketplace.visualstudio.com/items?itemName=webfreak.debug
+
 ## Tests
 
 ```sh

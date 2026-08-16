@@ -1,14 +1,19 @@
 // The headless emulator: the same console the window drives, with a
 // debugger on the front and no display attached.
 //
-//   wobble-dbg [bios] [-c "command"]... [script]
+//   wobble-dbg [bios] [-c "command"]... [--gdb port] [script]
 //
 // Commands come from -c arguments, a script file, or standard input,
 // whichever was given. Standard input is read only when neither of the
 // others was: a -c session that then waited on a terminal would hang
 // every script that used one, which is the way this is mostly driven.
+//
+// --gdb serves the GDB remote protocol instead of reading commands.
+// Any -c commands run first, so a session can be set up — run to an
+// address, load a state — before gdb takes over.
 
 #include <cstdio>
+#include <cstdlib>
 #include <fstream>
 #include <iostream>
 #include <string>
@@ -16,6 +21,7 @@
 
 #include "console.h"
 #include "debugger.h"
+#include "gdbstub.h"
 
 namespace {
 
@@ -39,11 +45,14 @@ int main(int argc, char** argv)
     std::string bios_path = "SCPH1001.BIN";
     std::vector<std::string> commands;
     std::string script_path;
+    int gdb_port = 0;
 
     for (int i = 1; i < argc; i++) {
         const std::string argument = argv[i];
         if (argument == "-c" && i + 1 < argc) {
             commands.emplace_back(argv[++i]);
+        } else if (argument == "--gdb" && i + 1 < argc) {
+            gdb_port = std::atoi(argv[++i]);
         } else if (argument.ends_with(".BIN") || argument.ends_with(".bin")) {
             bios_path = argument;
         } else {
@@ -67,6 +76,17 @@ int main(int argc, char** argv)
             return 0;
         }
     }
+    if (gdb_port > 0 && gdb_port <= 0xFFFF) {
+        GdbStub stub(console, debugger);
+        std::printf("gdb stub listening on 127.0.0.1:%d\n", gdb_port);
+        std::fflush(stdout);
+        if (!stub.serve(static_cast<u16>(gdb_port))) {
+            std::fprintf(stderr, "could not listen on port %d\n", gdb_port);
+            return 1;
+        }
+        return 0;
+    }
+
     if (!commands.empty() && script_path.empty()) {
         return 0;  // -c said everything it wanted to
     }
