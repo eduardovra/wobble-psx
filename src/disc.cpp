@@ -133,32 +133,44 @@ const Disc::Track* Disc::track_at(u32 lba) const
     return nullptr;
 }
 
-bool Disc::read_sector(u32 lba, std::array<u8, RAW_SECTOR_SIZE>& out) const
+bool Disc::read_image(u64 offset, u8* out, u32 size) const
 {
-    const Track* track = track_at(lba);
-    if (track == nullptr || !image.is_open()) {
+    if (compressed.is_open()) {
+        return compressed.read(offset, out, size);
+    }
+    if (!image.is_open()) {
         return false;
     }
 
-    const u64 offset = track->image_offset +
-        u64{lba - track->start_lba} * track->image_sector_size;
     image.clear();
     image.seekg(static_cast<std::streamoff>(offset));
     if (!image) {
         return false;
     }
+    const auto wanted = static_cast<std::streamsize>(size);
+    image.read(reinterpret_cast<char*>(out), wanted);
+    return image.gcount() == wanted;
+}
 
-    if (track->image_sector_size == RAW_SECTOR_SIZE) {
-        const auto wanted = static_cast<std::streamsize>(out.size());
-        image.read(reinterpret_cast<char*>(out.data()), wanted);
-        return image.gcount() == wanted;
+bool Disc::read_sector(u32 lba, std::array<u8, RAW_SECTOR_SIZE>& out) const
+{
+    const Track* track = track_at(lba);
+    if (track == nullptr) {
+        return false;
     }
 
-    // A 2048-byte image carries only the payload, so the rest of the
-    // sector is rebuilt around it: the sync pattern, a header saying
-    // which sector this is, and a subheader marking it as data. The
-    // error correction that would follow is left zero — nothing in the
-    // machine checks it, and a drive that reported a sector as good is
+    const u64 offset = track->image_offset +
+        u64{lba - track->start_lba} * track->image_sector_size;
+
+    if (track->image_data_size == RAW_SECTOR_SIZE) {
+        return read_image(offset, out.data(), RAW_SECTOR_SIZE);
+    }
+
+    // A 2048-byte sector is only the payload, so the rest is rebuilt
+    // around it: the sync pattern, a header saying which sector this
+    // is, and a subheader marking it as data. The error correction
+    // that would follow is left zero — nothing in the machine checks
+    // it, and a drive that reported a sector as good is
     // indistinguishable from one whose ECC happened to agree.
     out = {};
     std::copy(SYNC.begin(), SYNC.end(), out.begin());
@@ -171,9 +183,44 @@ bool Disc::read_sector(u32 lba, std::array<u8, RAW_SECTOR_SIZE>& out) const
               SUBHEADER_FORM1.end(),
               out.begin() + SUBHEADER_OFFSET);
 
-    image.read(reinterpret_cast<char*>(out.data() + MODE2_DATA_OFFSET),
-               COOKED_SECTOR_SIZE);
-    return image.gcount() == static_cast<std::streamsize>(COOKED_SECTOR_SIZE);
+    return read_image(
+        offset, out.data() + MODE2_DATA_OFFSET, COOKED_SECTOR_SIZE);
+}
+
+bool Disc::load_chd(const std::filesystem::path& path)
+{
+    if (!compressed.open(path)) {
+        return false;
+    }
+
+    // A track begins where its frames do, which for a track whose gap
+    // was stored with it is the gap and not the music — two seconds
+    // ahead of where the cue for the same disc would put it. That
+    // costs nothing while the sectors are only being read, since every
+    // one of them is at the address it should be; it is the track
+    // start reported to a game seeking to play the track that is
+    // early, and there is no playing them yet.
+    u32 lba = 0;
+    for (const Chd::Track& stored : compressed.tracks) {
+        // A gap the image never stored is still part of the disc, so
+        // the track after it begins that much further along.
+        lba += stored.pregap_frames;
+
+        Track track;
+        track.number = stored.number;
+        track.audio = stored.audio;
+        track.start_lba = lba;
+        track.length_sectors = stored.frames;
+        track.image_sector_size = Chd::FRAME_SIZE;
+        track.image_data_size = stored.sector_data_size;
+        track.image_offset = u64{stored.first_frame} * Chd::FRAME_SIZE;
+        tracks.push_back(track);
+
+        lba += stored.frames;
+    }
+
+    image_path = path.string();
+    return true;
 }
 
 bool Disc::load(const std::string& path)
@@ -181,6 +228,7 @@ bool Disc::load(const std::string& path)
     tracks.clear();
     image.close();
     image.clear();
+    compressed = Chd();
     image_path.clear();
 
     // A game usually arrives as a zip, and being handed one is not a
@@ -193,6 +241,12 @@ bool Disc::load(const std::string& path)
         if (given.empty()) {
             return false;
         }
+    }
+
+    // A CHD carries its own track list and is read compressed, so
+    // none of the sizing below applies to it.
+    if (Chd::is_chd(given)) {
+        return load_chd(given);
     }
 
     std::filesystem::path binary = given;
@@ -277,6 +331,9 @@ bool Disc::load(const std::string& path)
     u64 offset = 0;
     for (std::size_t i = 0; i < parsed.size(); i++) {
         Track& track = parsed[i];
+        // A file holds nothing but the sectors themselves, so one
+        // costs exactly as much of it as the sector is.
+        track.image_data_size = track.image_sector_size;
         track.image_offset = offset;
         u32 end = 0;
         if (i + 1 < parsed.size()) {

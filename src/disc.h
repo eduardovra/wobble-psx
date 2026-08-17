@@ -1,10 +1,12 @@
 #pragma once
 
 #include <array>
+#include <filesystem>
 #include <fstream>
 #include <string>
 #include <vector>
 
+#include "chd.h"
 #include "types.h"
 
 // A disc in the drive.
@@ -25,6 +27,10 @@
 // The image is read from the file as the drive asks for sectors rather
 // than held in memory: a full disc is several hundred megabytes, and
 // the drive never wants more than one sector at a time.
+//
+// A .chd is read the same way, through the reader in chd.h, and the
+// only difference is where a sector's bytes come from: the tracks, the
+// numbering and everything downstream of it are the same.
 struct Disc {
     static constexpr u32 RAW_SECTOR_SIZE = 2352;
     static constexpr u32 COOKED_SECTOR_SIZE = 2048;
@@ -62,15 +68,19 @@ struct Disc {
         u32 length_sectors = 0;
 
         // How the image stores it, which is not always how the drive
-        // serves it — a 2048-byte image is padded back up to 2352 on
+        // serves it. One sector costs this many bytes of the image —
+        // more than the sector itself in a CHD, which keeps the
+        // subcode after it — of which the first ones are the sector,
+        // and a sector shorter than 2352 bytes is padded back up on
         // the way out.
         u32 image_sector_size = RAW_SECTOR_SIZE;
+        u32 image_data_size = RAW_SECTOR_SIZE;
         u64 image_offset = 0;
     };
 
-    // Opens a .cue and the image it names, or a bare .bin/.iso as a
-    // single data track. False if nothing could be opened or the image
-    // is not a whole number of sectors.
+    // Opens a .cue and the image it names, a .chd, or a bare .bin/.iso
+    // as a single data track. False if nothing could be opened or the
+    // image is not a whole number of sectors.
     bool load(const std::string& path);
 
     bool loaded() const { return !tracks.empty(); }
@@ -88,11 +98,20 @@ struct Disc {
 
     std::vector<Track> tracks;
 
-    // Kept open for the life of the disc. Mutable because reading a
-    // sector is a seek and a read on it, and a disc being read is not
-    // a disc being changed.
+    // Kept open for the life of the disc, one or the other of them
+    // depending on what was loaded. The stream is mutable because
+    // reading a sector is a seek and a read on it, and a disc being
+    // read is not a disc being changed.
     mutable std::ifstream image;
+    Chd compressed;
     std::string image_path;
+
+private:
+    // The tracks of a CHD, laid out in the numbering the drive uses.
+    bool load_chd(const std::filesystem::path& path);
+
+    // Bytes at an offset of whichever of the two the disc came from.
+    bool read_image(u64 offset, u8* out, u32 size) const;
 };
 
 // The two numberings the drive uses, and the conversion between them.

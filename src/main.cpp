@@ -356,11 +356,12 @@ int main(int argc, char** argv)
             exe_path = argv[++i];
         } else if (argument == "--disc" && i + 1 < argc) {
             disc_path = argv[++i];
-        } else if (argument.ends_with(".zip") || argument.ends_with(".cue")) {
+        } else if (argument.ends_with(".zip") || argument.ends_with(".cue") ||
+                   argument.ends_with(".chd")) {
             // A game named without the flag, since that is what
-            // anyone would try first. Only the two extensions a disc
-            // is unambiguously named with are taken this way: a .bin
-            // is as likely to be the BIOS as a disc, so that one still
+            // anyone would try first. Only the extensions a disc is
+            // unambiguously named with are taken this way: a .bin is
+            // as likely to be the BIOS as a disc, so that one still
             // has to say which it is.
             disc_path = argument;
         } else {

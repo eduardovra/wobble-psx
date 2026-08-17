@@ -15,8 +15,9 @@ it names, and runs it.
 
 The zip a game is distributed in can be given as it is — there is no
 need to unpack it first, or to know which of the files inside is the
-one to open. A `.cue` or `.bin` already sitting on disk works just as
-well, with `--disc` if the extension is one the BIOS image also uses.
+one to open. A `.chd`, `.cue` or `.bin` already sitting on disk works
+just as well, with `--disc` if the extension is one the BIOS image also
+uses.
 
 The disc is unpacked into the system's temporary directory, and only
 the part the drive can actually read: the cue, and the one image it
@@ -42,6 +43,15 @@ BIN/CUE is the format underneath, since that is what a PlayStation disc
 actually is — 2352-byte sectors with their own sync and header, and any
 Redbook audio in tracks of its own. A bare `.iso` of 2048-byte blocks
 is accepted too and has its missing sync and headers synthesised.
+
+A `.chd` needs none of this and is the better way to keep a game. It is
+the same disc compressed in hunks of a few sectors each, with an index
+in front saying where every one of them landed, so the drive can seek
+in it where it lies — one hunk decompressed per sector read, and no
+unpacking at all. Crash is 443 MB as a CHD against the 603 MB it
+occupies unpacked, and it starts the moment it is asked to. The
+decompression is [libchdr](https://github.com/rtissera/libchdr)'s,
+which is what MAME reads the format with.
 
 Games boot, run their startup, draw and make sound. None is playable
 yet. The MDEC that decodes full-motion video is missing entirely.

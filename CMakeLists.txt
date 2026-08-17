@@ -38,7 +38,22 @@ FetchContent_Declare(
     GIT_REPOSITORY https://github.com/richgel999/miniz.git
     GIT_TAG 3.1.2
 )
-FetchContent_MakeAvailable(SDL3 imgui doctest miniz)
+# Reads the .chd a game is often kept as instead of a bin/cue. The
+# format is a compressed image with a hunk index in front of it, so a
+# sector in the middle costs one hunk of decompression and not a walk
+# from the start — which is what makes it worth reading in place when
+# a zip is not. Its own miniz is skipped: the target above already
+# exists, and libchdr links whichever one it finds.
+FetchContent_Declare(
+    libchdr
+    GIT_REPOSITORY https://github.com/rtissera/libchdr.git
+    GIT_TAG v0.3.0
+)
+# miniz before libchdr, since that is the order the targets are needed.
+FetchContent_MakeAvailable(SDL3 imgui doctest miniz libchdr)
+
+# libchdr builds a benchmark of its own that nothing here runs.
+set_target_properties(chdr-benchmark PROPERTIES EXCLUDE_FROM_ALL TRUE)
 
 add_library(imgui STATIC
     ${imgui_SOURCE_DIR}/imgui.cpp
@@ -61,6 +76,7 @@ add_library(core STATIC
     src/archive.cpp
     src/bus.cpp
     src/cdrom.cpp
+    src/chd.cpp
     src/console.cpp
     src/cpu.cpp
     src/debugger.cpp
@@ -83,7 +99,7 @@ add_library(core STATIC
 target_include_directories(core PUBLIC src)
 # miniz ships a zlib-compatible name layer this project never calls,
 # and it warns about being unused in every file that includes it.
-target_link_libraries(core PUBLIC miniz)
+target_link_libraries(core PUBLIC miniz chdr-static)
 target_compile_definitions(core PUBLIC MINIZ_NO_ZLIB_COMPATIBLE_NAMES)
 
 add_executable(wobble src/main.cpp)
@@ -99,6 +115,7 @@ add_executable(tests
     tests/test_archive.cpp
     tests/test_bus.cpp
     tests/test_cdrom.cpp
+    tests/test_chd.cpp
     tests/test_cpu.cpp
     tests/test_debugger.cpp
     tests/test_disasm.cpp

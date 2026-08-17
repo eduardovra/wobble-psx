@@ -31,7 +31,8 @@ bool is_cue(const std::string& name) { return extension_of(name) == CUE; }
 bool is_disc_image(const std::string& name)
 {
     const std::string extension = extension_of(name);
-    return extension == ".bin" || extension == ".iso" || extension == ".img";
+    return extension == ".bin" || extension == ".iso" || extension == ".img" ||
+        extension == ".chd";
 }
 
 // A zip entry names a path, and nothing stops it naming one outside
