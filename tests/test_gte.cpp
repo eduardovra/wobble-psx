@@ -276,11 +276,11 @@ TEST_CASE("the colour FIFO is pushed rather than assigned")
     gte.rgbc = {0x10, 0x20, 0x30, 0x2C};
     gte.v[0] = {0x100, 0x100, 0x100};
 
-    gte.execute(command(0x1D) | SHIFT_RESULT);  // NCS
+    gte.execute(command(0x1E) | SHIFT_RESULT);  // NCS
     const std::array<u8, 4> first = gte.rgb[2];
 
     gte.v[0] = {0x080, 0x080, 0x080};
-    gte.execute(command(0x1D) | SHIFT_RESULT);
+    gte.execute(command(0x1E) | SHIFT_RESULT);
 
     CHECK(gte.rgb[1] == first);
     CHECK(gte.rgb[2][3] == 0x2C);  // the GP0 command byte travels along

@@ -20,7 +20,7 @@ enum Operation : u32 {
     NCDT = 0x16,   // normal colour, depth cued, three vertices
     NCCS = 0x1B,   // normal colour with the vertex colour, one vertex
     CC = 0x1C,     // colour colour
-    NCS = 0x1D,    // normal colour, one vertex
+    NCS = 0x1E,    // normal colour, one vertex
     NCT = 0x20,    // normal colour, three vertices
     SQR = 0x28,    // square of IR1..3
     DCPL = 0x29,   // depth cue the lit vertex colour
@@ -456,7 +456,7 @@ u32 Gte::perspective_divide()
     return std::min<u32>(0x1FFFF, static_cast<u32>((product + 0x8000) >> 16));
 }
 
-void Gte::project(u32 vertex, const Modifiers& modifiers)
+void Gte::project(u32 vertex, const Modifiers& modifiers, bool cue_depth)
 {
     const Matrix& rotation = matrix[0];
     const Vector& tr = translation[0];
@@ -518,6 +518,15 @@ void Gte::project(u32 vertex, const Modifiers& modifiers)
     // Depth cueing rides on the same reciprocal: how much fog this
     // vertex gets is linear in its distance. Saturated from the whole
     // result too, for the same reason.
+    //
+    // There is only one IR0 to put it in, so transforming three
+    // vertices does it once, for the last of them. Doing it for all
+    // three would leave the same value behind but a flag that says a
+    // vertex nobody asked about saturated.
+    if (!cue_depth) {
+        return;
+    }
+
     const s64 depth_cue = factor * dqa + dqb;
     set_mac0(depth_cue);
     const s64 fog = depth_cue >> FRACTION_BITS;
@@ -603,12 +612,12 @@ u32 Gte::execute(u32 instruction)
 
     switch (operation) {
     case RTPS:
-        project(0, modifiers);
+        project(0, modifiers, true);
         break;
 
     case RTPT:
         for (u32 vertex = 0; vertex < 3; vertex++) {
-            project(vertex, modifiers);
+            project(vertex, modifiers, vertex == 2);
         }
         break;
 
@@ -646,7 +655,11 @@ u32 Gte::execute(u32 instruction)
 
     case AVSZ3: {
         const s64 sum = s64{sz[1]} + sz[2] + sz[3];
-        const s32 average = set_mac0(s64{zsf3} * sum) >> FRACTION_BITS;
+        const s64 total = s64{zsf3} * sum;
+        set_mac0(total);
+        // Shifted before it is narrowed, as everywhere else: an average
+        // too large to fit comes back wrapped rather than clamped high.
+        const s32 average = static_cast<s32>(total >> FRACTION_BITS);
         if (average < 0 || average > DEPTH_MAX) {
             flag |= FLAG_DEPTH_SATURATED;
         }
@@ -656,7 +669,9 @@ u32 Gte::execute(u32 instruction)
 
     case AVSZ4: {
         const s64 sum = s64{sz[0]} + sz[1] + sz[2] + sz[3];
-        const s32 average = set_mac0(s64{zsf4} * sum) >> FRACTION_BITS;
+        const s64 total = s64{zsf4} * sum;
+        set_mac0(total);
+        const s32 average = static_cast<s32>(total >> FRACTION_BITS);
         if (average < 0 || average > DEPTH_MAX) {
             flag |= FLAG_DEPTH_SATURATED;
         }

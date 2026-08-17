@@ -175,8 +175,10 @@ private:
     // distance fade to fog.
     void interpolate(const Modifiers& modifiers);
 
-    // One vertex through the full perspective transform.
-    void project(u32 vertex, const Modifiers& modifiers);
+    // One vertex through the full perspective transform. The depth cue
+    // at the end of it is the one part that is not per-vertex: three
+    // vertices share the one IR0, so only the last one computes it.
+    void project(u32 vertex, const Modifiers& modifiers, bool cue_depth);
 
     // The reciprocal of SZ3, as the hardware computes it: H*20000h/SZ3
     // rounded, limited to 1FFFFh, with FLAG's divide bit set if it hit
