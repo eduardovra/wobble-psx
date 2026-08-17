@@ -30,7 +30,7 @@ struct State;
 //
 // So far RAM, the scratchpad, the BIOS, the interrupt controller, the
 // GPU's ports, the DMA controller, the CD-ROM, the controller port and
-// the SPU's register side are real; the rest of the register range
+// the SPU are real; the rest of the register range
 // reads as zero and swallows writes. The MDEC, which decodes the
 // compressed video a game plays between levels, is the largest thing
 // still missing.

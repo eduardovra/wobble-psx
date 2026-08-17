@@ -33,6 +33,11 @@ enum class EventKind : u32 {
     // they pass unread still raises its interrupt on time.
     Timers,
 
+    // One sample coming out of the sound processor. The finest
+    // heartbeat the machine has, and the one the rest are derived
+    // from: everything else here is some whole number of these.
+    Spu,
+
     // A controller acknowledging the byte it was just sent. Unlike the
     // others this is scheduled when it is needed and not repeated:
     // there is nothing to wake up for until something is said.

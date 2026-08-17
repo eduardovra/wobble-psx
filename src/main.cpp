@@ -3,6 +3,7 @@
 // just a Bus (memory and devices) with a Cpu attached to it.
 
 #include <algorithm>
+#include <array>
 #include <string>
 #include <vector>
 
@@ -16,6 +17,7 @@
 #include "exe.h"
 #include "gpu.h"
 #include "sio.h"
+#include "spu.h"
 
 namespace {
 
@@ -71,6 +73,62 @@ void handle_pad_key(Sio& sio, const SDL_Event& event)
 // 60 Hz, so running one sixtieth of a second of console time per pass
 // keeps the emulator at roughly real speed.
 constexpr u64 CYCLES_PER_HOST_FRAME = CPU_CLOCK_HZ / 60;
+
+// How much sound may be waiting to be played before the emulator is
+// making it faster than the sound card is taking it. The two clocks
+// are never quite the same speed — the display paces one and a crystal
+// on the sound card the other — so whichever is faster, the queue
+// drifts. Left alone it either empties, which crackles, or grows until
+// the sound is a second behind the picture. Throwing away what is over
+// the mark keeps the delay bounded, at the cost of a dropout so short
+// it is not heard.
+constexpr int MAX_QUEUED_FRAMES = Spu::SAMPLE_RATE / 10;  // 100 ms
+constexpr int MAX_QUEUED_BYTES =
+    MAX_QUEUED_FRAMES * static_cast<int>(sizeof(Spu::Frame));
+
+// The sound card, if there is one. A machine with no audio device is
+// not a failure to start: the SPU runs either way, and the picture is
+// still worth having.
+SDL_AudioStream* open_audio()
+{
+    if (!SDL_InitSubSystem(SDL_INIT_AUDIO)) {
+        SDL_Log("no audio: %s", SDL_GetError());
+        return nullptr;
+    }
+
+    const SDL_AudioSpec spec = {
+        SDL_AUDIO_S16, 2, static_cast<int>(Spu::SAMPLE_RATE)};
+    SDL_AudioStream* stream = SDL_OpenAudioDeviceStream(
+        SDL_AUDIO_DEVICE_DEFAULT_PLAYBACK, &spec, nullptr, nullptr);
+    if (stream == nullptr) {
+        SDL_Log("no audio: %s", SDL_GetError());
+        return nullptr;
+    }
+
+    SDL_ResumeAudioStreamDevice(stream);
+    return stream;
+}
+
+// Everything the SPU has made since the last frame, handed to SDL to
+// play. Pushing from here rather than from an audio callback means the
+// device is fed on the same thread that runs the machine, so nothing
+// has to be locked.
+void push_audio(SDL_AudioStream* stream, Spu& spu)
+{
+    std::array<Spu::Frame, 1024> frames{};
+    while (true) {
+        const u32 count = spu.take_output(frames.data(), frames.size());
+        if (count == 0) {
+            return;
+        }
+        if (SDL_GetAudioStreamQueued(stream) > MAX_QUEUED_BYTES) {
+            continue;  // drained, and dropped: the queue is too long
+        }
+        SDL_PutAudioStreamData(stream,
+                               frames.data(),
+                               static_cast<int>(count * sizeof(Spu::Frame)));
+    }
+}
 
 // The console's picture on its way to the window. The texture is made
 // once at the largest size any display mode reaches, and only the part
@@ -357,6 +415,8 @@ int main(int argc, char** argv)
     }
     SDL_SetRenderVSync(renderer, 1);
 
+    SDL_AudioStream* audio = open_audio();
+
     Display display;
     if (!display.create(renderer)) {
         SDL_Log("could not create the display texture: %s", SDL_GetError());
@@ -386,6 +446,9 @@ int main(int argc, char** argv)
         if (emu_running) {
             console.run_cycles(CYCLES_PER_HOST_FRAME);
         }
+        if (audio != nullptr) {
+            push_audio(audio, console.bus.spu);
+        }
         if (console.cpu.halted && !was_halted) {
             SDL_Log("cpu halted: %s", console.cpu.halt_reason.c_str());
         }
@@ -409,6 +472,7 @@ int main(int argc, char** argv)
         SDL_RenderPresent(renderer);
     }
 
+    SDL_DestroyAudioStream(audio);
     SDL_DestroyTexture(display.texture);
     ImGui_ImplSDLRenderer3_Shutdown();
     ImGui_ImplSDL3_Shutdown();

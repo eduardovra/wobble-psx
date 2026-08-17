@@ -43,12 +43,27 @@ actually is — 2352-byte sectors with their own sync and header, and any
 Redbook audio in tracks of its own. A bare `.iso` of 2048-byte blocks
 is accepted too and has its missing sync and headers synthesised.
 
-Games boot, run their startup and draw. None is playable yet. The SPU
-is present but silent — its registers, its half megabyte of sample
-memory and the handshakes software waits on are all there, so a game
-gets past initialising its sound and on to drawing, but nothing is
-decoded and nothing is heard. The MDEC that decodes full-motion video
-is missing entirely.
+Games boot, run their startup, draw and make sound. None is playable
+yet. The MDEC that decodes full-motion video is missing entirely.
+
+## Sound
+
+The SPU plays. All twenty-four voices decode their ADPCM out of the
+half megabyte of sample memory, resample it to the pitch each was
+given, shape it with the envelope software described, and mix down to
+a stereo pair every 768 master cycles — which is 44100 times a second,
+the rate the whole console is clocked from.
+
+What is not there is the wet path and the corners: no reverb, no noise
+generator, no pitch modulation, no volume sweeps (a fade is heard at
+full volume rather than fading), and no CD audio, so a game whose music
+is Redbook tracks on the disc still plays its sound effects and nothing
+else. Each is marked in `src/spu.cpp` where it would have gone.
+
+A host with no sound card is not a failure to start: the SPU runs
+either way and takes the same time to play a sound, since a game that
+paces itself against its own music must not run differently for being
+inaudible.
 
 A program can also be handed to the machine directly, with no disc
 involved. `--exe` boots the BIOS and then puts a PS-EXE where the
@@ -110,8 +125,9 @@ the machine, `break` and `watch` stop it, `regs`/`mem`/`disas`/`dev`
 look at it, `pad` holds a controller button down, `trace` shows the last
 instructions retired, `profile` reports where the time and the memory
 accesses went, `screen` writes what the display is showing as a PPM,
-`exe` loads a PS-EXE, and `save`/`load` take snapshots. Numbers are hex
-unless prefixed with `#`.
+`audio` writes what the SPU has played as a WAV, `exe` loads a PS-EXE,
+and `save`/`load` take snapshots. Numbers are hex unless prefixed
+with `#`.
 
 `exe` is what makes the test suites written for emulator development
 usable, since those ship as PS-EXEs and report their results as text
@@ -136,6 +152,15 @@ So the picture the machine is producing can be had without a window:
 
 ```sh
 ./build-rel/wobble-dbg SCPH1001.BIN -c "frames #320" -c "screen boot.ppm"
+```
+
+And so can the sound, which is the only way to hear a run on a machine
+with no sound card — or to measure one, since a WAV is what every
+plotting script already opens:
+
+```sh
+./build-rel/wobble-dbg SCPH1001.BIN -c "audio on" -c "frames #400" \
+    -c "audio boot.wav"
 ```
 
 Nothing the debugger does changes what the machine does — a test

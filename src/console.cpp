@@ -6,6 +6,7 @@
 #include "gpu.h"
 #include "irq.h"
 #include "savestate.h"
+#include "spu.h"
 #include "timers.h"
 
 void Console::reset()
@@ -23,6 +24,7 @@ void Console::reset()
     scheduler.schedule_in(EventKind::Hblank, Gpu::CYCLES_PER_SCANLINE);
     scheduler.schedule_in(EventKind::CdRom, CdRom::TICK_CYCLES);
     scheduler.schedule_in(EventKind::Timers, Timers::TICK_CYCLES);
+    scheduler.schedule_in(EventKind::Spu, Spu::TICK_CYCLES);
 }
 
 void Console::dispatch_due_events()
@@ -52,6 +54,17 @@ void Console::dispatch_due_events()
             }
             scheduler.schedule_at(EventKind::CdRom,
                                   event->deadline + CdRom::TICK_CYCLES);
+            break;
+        case EventKind::Spu:
+            // The one sample the SPU owes the output, whether or not
+            // anything is listening: a machine whose host has no sound
+            // card must still take the same time to play a sound, or
+            // everything a game paces against its own music drifts.
+            if (bus.spu.tick()) {
+                bus.irq.raise(Interrupt::Spu);
+            }
+            scheduler.schedule_at(EventKind::Spu,
+                                  event->deadline + Spu::TICK_CYCLES);
             break;
         case EventKind::Sio:
             if (bus.sio.deliver_acknowledge()) {

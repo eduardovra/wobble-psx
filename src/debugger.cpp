@@ -18,6 +18,7 @@
 #include "gpu.h"
 #include "irq.h"
 #include "sio.h"
+#include "spu.h"
 #include "timers.h"
 
 namespace {
@@ -188,6 +189,13 @@ std::string format_devices(Console& console)
                         timer.target,
                         timer.mode);
     }
+    const Spu& spu = console.bus.spu;
+    out += std::format("spu  ctrl {:04X}  endx {:06X}  playing {}  "
+                       "samples {}\n",
+                       spu.control(),
+                       spu.ended,
+                       spu.active_voices(),
+                       spu.output_ready());
     out += std::format("irq  stat {:04X}  mask {:04X}  active {}\n",
                        irq.status,
                        irq.mask,
@@ -261,7 +269,7 @@ constexpr const char* HELP =
     "regs               the register file and COP0\n"
     "disas [addr] [n]   disassemble n instructions (default at pc)\n"
     "mem <addr> [n]     dump n words\n"
-    "dev                device state: irq, gpu, dma, cdrom, pad, timers\n"
+    "dev                device state: irq, gpu, dma, cdrom, pad, timers, spu\n"
     "pad <down|up> <button>   hold a controller button, or let go\n"
     "trace [n]          the last n instructions retired\n"
     "tracing <on|off>   record the instruction trace\n"
@@ -269,6 +277,8 @@ constexpr const char* HELP =
     "disc <file>        put a disc in the drive (.zip, .cue, .bin)\n"
     "exe <file>         boot the BIOS, then run a PS-EXE on it\n"
     "screen <file>      write what the display shows, as a PPM\n"
+    "audio <on|off>     record what the SPU plays\n"
+    "audio <file>       write what has been recorded, as a WAV\n"
     "save <file>        write a save state\n"
     "load <file>        restore one\n"
     "reset              power-cycle the machine\n"
@@ -310,7 +320,68 @@ std::string write_screen(const Gpu& gpu, const std::string& path)
                        gpu.display_disabled ? " (display is blanked)" : "");
 }
 
+// Writes what has been recorded as a WAV: a forty-four byte header and
+// then the samples, which is the audio equivalent of the PPM above —
+// the plainest container the frames will go in, and one that every
+// player and every plotting script already opens.
+std::string write_audio(const std::vector<Spu::Frame>& frames,
+                        const std::string& path)
+{
+    std::ofstream file(path, std::ios::binary);
+    if (!file) {
+        return "could not open that file\n";
+    }
+
+    const u32 data_bytes = static_cast<u32>(frames.size() * sizeof(Spu::Frame));
+    const u32 byte_rate = Spu::SAMPLE_RATE * sizeof(Spu::Frame);
+
+    const auto put = [&](const char* text) { file.write(text, 4); };
+    const auto put32 = [&](u32 value) {
+        const std::array<char, 4> bytes = {static_cast<char>(value),
+                                           static_cast<char>(value >> 8),
+                                           static_cast<char>(value >> 16),
+                                           static_cast<char>(value >> 24)};
+        file.write(bytes.data(), bytes.size());
+    };
+    const auto put16 = [&](u16 value) {
+        const std::array<char, 2> bytes = {static_cast<char>(value),
+                                           static_cast<char>(value >> 8)};
+        file.write(bytes.data(), bytes.size());
+    };
+
+    put("RIFF");
+    put32(36 + data_bytes);
+    put("WAVE");
+    put("fmt ");
+    put32(16);  // the length of this chunk
+    put16(1);   // uncompressed
+    put16(2);   // stereo
+    put32(Spu::SAMPLE_RATE);
+    put32(byte_rate);
+    put16(sizeof(Spu::Frame));  // bytes per frame
+    put16(16);                  // bits per sample
+    put("data");
+    put32(data_bytes);
+    file.write(reinterpret_cast<const char*>(frames.data()), data_bytes);
+
+    return std::format("wrote {} frames, {:.2f} seconds\n",
+                       frames.size(),
+                       static_cast<double>(frames.size()) / Spu::SAMPLE_RATE);
+}
+
 }  // namespace
+
+void Debugger::take_recording(Spu& spu)
+{
+    std::array<Spu::Frame, 1024> frames{};
+    while (true) {
+        const u32 count = spu.take_output(frames.data(), frames.size());
+        if (count == 0) {
+            return;
+        }
+        recorded.insert(recorded.end(), frames.begin(), frames.begin() + count);
+    }
+}
 
 void Debugger::note_access(u32 address, u32 length, bool write)
 {
@@ -379,6 +450,14 @@ Debugger::run(Console& console, u64 limit, std::optional<u32> target)
 
         console.step();
         instructions_run++;
+
+        // The SPU's buffer holds a fifth of a second, so it has to be
+        // emptied while the machine runs rather than after it. Once
+        // every few thousand instructions is often enough — that is a
+        // fraction of a millisecond of console time.
+        if (recording && (i % 1024) == 0) {
+            take_recording(console.bus.spu);
+        }
 
         if (watch_hit) {
             stop = Stop::Watchpoint;
@@ -760,6 +839,22 @@ std::string Debugger::execute(Console& console, const std::string& line)
             return "screen needs a filename\n";
         }
         return write_screen(console.bus.gpu, path);
+    }
+
+    if (command == "audio") {
+        if (words.size() < 2) {
+            return "audio needs on, off or a filename\n";
+        }
+        if (words[1] == "on" || words[1] == "off") {
+            recording = words[1] == "on";
+            // Whatever the SPU is holding was made before anyone asked
+            // to listen, so it is dropped rather than recorded.
+            take_recording(console.bus.spu);
+            recorded.clear();
+            return recording ? "recording\n" : "stopped\n";
+        }
+        take_recording(console.bus.spu);
+        return write_audio(recorded, filename());
     }
 
     if (command == "tty") {

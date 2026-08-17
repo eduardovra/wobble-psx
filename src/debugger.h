@@ -6,6 +6,7 @@
 #include <unordered_map>
 #include <vector>
 
+#include "spu.h"
 #include "types.h"
 
 struct Console;
@@ -57,6 +58,10 @@ struct Debugger {
     // work; `target` stops on arrival at an address.
     Stop run(Console& console, u64 limit, std::optional<u32> target);
 
+    // Moves whatever the SPU has finished into `recorded`, so a long
+    // run is captured rather than only its last fifth of a second.
+    void take_recording(Spu& spu);
+
     // Called by the bus on every access while a debugger is attached.
     // Records the address for the data profile and notes whether it
     // fell in a watched range.
@@ -88,6 +93,14 @@ struct Debugger {
     bool profiling = false;
     std::unordered_map<u32, u64> pc_counts;
     std::unordered_map<u32, u64> data_counts;
+
+    // What the SPU has produced, kept because there is no sound card
+    // here to send it to and the machine drops whatever nobody takes.
+    // This is to the sound what `screen` is to the picture: the only
+    // way to hear a headless run. Off by default — a second of it is
+    // 176 KB, and a run nobody is listening to should not pay for it.
+    bool recording = false;
+    std::vector<Spu::Frame> recorded;
 
     // Set by note_access when a watched range is touched; the run loop
     // picks it up after the instruction finishes, so the access has
