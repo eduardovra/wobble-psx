@@ -223,7 +223,7 @@ TEST_CASE("GPUSTAT's drawing bit follows the video signal")
     }
 }
 
-TEST_CASE("the GPU reports itself ready except while loading an image")
+TEST_CASE("loading an image stops commands but is what wants a block")
 {
     Gpu gpu;
     constexpr u32 READY_FOR_DMA = 1u << 28;
@@ -238,11 +238,15 @@ TEST_CASE("the GPU reports itself ready except while loading an image")
     gpu.write_gp0(gp0(0xA0));
     gpu.write_gp0(0);
     gpu.write_gp0((1u << 16) | 2);
-    CHECK((gpu.status() & READY_FOR_DMA) == 0);
     CHECK((gpu.status() & READY_FOR_COMMAND) == 0);
+    // Still asking for the pixels, which is the whole reason it is not
+    // ready for anything else. Software uploading a picture waits on
+    // this bit between blocks and would wait forever if it cleared.
+    CHECK((gpu.status() & READY_FOR_DMA) != 0);
 
     gpu.write_gp0(0x11112222);
     CHECK((gpu.status() & READY_FOR_DMA) != 0);
+    CHECK((gpu.status() & READY_FOR_COMMAND) != 0);
 }
 
 TEST_CASE("an image is written into VRAM two pixels to a word")
@@ -351,10 +355,17 @@ TEST_CASE("the DMA direction decides what the request bit answers")
     CHECK((gpu.status() & DMA_REQUEST) != 0);
     CHECK((gpu.status() & (0x3u << 29)) == (2u << 29));
 
-    // Mid-transfer it is not ready, and says so through the same bit.
+    // Mid-transfer it is still asking: the pixels going into VRAM are
+    // exactly what the channel is there to deliver.
     gpu.write_gp0(gp0(0xA0));
     gpu.write_gp0(0);
     gpu.write_gp0((1u << 16) | 2);
+    CHECK((gpu.status() & DMA_REQUEST) != 0);
+
+    // The other direction has nothing to send until a read is asked
+    // for, and answers the same bit with that.
+    gpu.write_gp0(0x11112222);
+    gpu.write_gp1(0x04000003);  // VRAM to CPU
     CHECK((gpu.status() & DMA_REQUEST) == 0);
 }
 

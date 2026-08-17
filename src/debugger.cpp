@@ -17,6 +17,7 @@
 #include "exe.h"
 #include "gpu.h"
 #include "irq.h"
+#include "mdec.h"
 #include "sio.h"
 #include "spu.h"
 #include "timers.h"
@@ -211,6 +212,11 @@ std::string format_devices(Console& console)
                        gpu.transfer.width,
                        gpu.transfer.height,
                        gpu.transfer.pixels_done);
+    const Mdec& mdec = console.bus.mdec;
+    out += std::format("mdec  stat {:08X}  waiting {}  decoded {}\n",
+                       mdec.status(),
+                       mdec.input.size() - mdec.input_position,
+                       mdec.output.size() - mdec.output_position);
     out += std::format("dma  dpcr {:08X}  dicr {:08X}\n",
                        dma.control,
                        dma.read_register(Dma::BASE + 0x74));

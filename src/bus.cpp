@@ -119,6 +119,7 @@ void Bus::visit_state(State& state)
     sio.visit_state(state);
     spu.visit_state(state);
     timers.visit_state(state);
+    mdec.visit_state(state);
 }
 
 bool Bus::read_io(u32 phys, u32& value, u32 width)
@@ -164,6 +165,10 @@ bool Bus::read_io(u32 phys, u32& value, u32 width)
         if (width == 4) {
             value |= u32{spu.read_register(phys + 2)} << 16;
         }
+        return true;
+    }
+    if (phys >= Mdec::BASE && phys < Mdec::END) {
+        value = mdec.read_register(phys);
         return true;
     }
     return false;
@@ -230,6 +235,10 @@ bool Bus::write_io(u32 phys, u32 value, u32 width)
         if (spu.interrupt_pending()) {
             irq.raise(Interrupt::Spu);
         }
+        return true;
+    }
+    if (phys >= Mdec::BASE && phys < Mdec::END) {
+        mdec.write_register(phys, value);
         return true;
     }
     return false;

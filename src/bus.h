@@ -9,6 +9,7 @@
 #include "dma.h"
 #include "gpu.h"
 #include "irq.h"
+#include "mdec.h"
 #include "scheduler.h"
 #include "sio.h"
 #include "spu.h"
@@ -29,11 +30,9 @@ struct State;
 //   0x1FC00000  512 KB BIOS ROM
 //
 // So far RAM, the scratchpad, the BIOS, the interrupt controller, the
-// GPU's ports, the DMA controller, the CD-ROM, the controller port and
-// the SPU are real; the rest of the register range
-// reads as zero and swallows writes. The MDEC, which decodes the
-// compressed video a game plays between levels, is the largest thing
-// still missing.
+// GPU's ports, the DMA controller, the CD-ROM, the controller port, the
+// SPU and the MDEC are real; the rest of the register range reads as
+// zero and swallows writes.
 struct Bus {
     // The clock comes in from outside because the bus does not own it:
     // the CPU drives it forward, and the devices behind here are timed
@@ -139,6 +138,7 @@ struct Bus {
     Sio sio;
     Spu spu;
     Timers timers;
+    Mdec mdec;
 
     // Bounded by the number of distinct unhandled addresses a game
     // actually touches, which is small.

@@ -298,11 +298,18 @@ u32 Gpu::status() const
     // work, and the reason this has to be derived rather than fixed:
     // during a transfer into VRAM the GPU genuinely is not ready for a
     // command, and says so.
+    //
+    // The block bit is not the command bit repeated. A transfer into
+    // VRAM is not ready for a command precisely because it is waiting
+    // for a block, and software that uploads a picture polls this one
+    // before every block it sends — an MDEC frame reaching the screen
+    // depends on it.
     const bool ready_for_command = mode != Gp0Mode::ImageLoad;
     const bool ready_to_send = mode == Gp0Mode::ImageStore;
+    const bool ready_for_block = mode != Gp0Mode::ImageStore;
     value |= static_cast<u32>(ready_for_command) << 26;
     value |= static_cast<u32>(ready_to_send) << 27;
-    value |= static_cast<u32>(ready_for_command) << 28;
+    value |= static_cast<u32>(ready_for_block) << 28;
 
     // Bit 25 answers the DMA controller's request line, and what it
     // means depends on which way the transfer is going.
@@ -315,7 +322,7 @@ u32 Gpu::status() const
         dma_request = true;  // the command FIFO is never full here
         break;
     case DmaDirection::CpuToGp0:
-        dma_request = ready_for_command;
+        dma_request = ready_for_block;
         break;
     case DmaDirection::VramToCpu:
         dma_request = ready_to_send;

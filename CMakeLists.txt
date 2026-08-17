@@ -89,6 +89,7 @@ add_library(core STATIC
     src/gte.cpp
     src/irq.cpp
     src/log.cpp
+    src/mdec.cpp
     src/raster.cpp
     src/savestate.cpp
     src/scheduler.cpp
@@ -126,6 +127,7 @@ add_executable(tests
     tests/test_gpu.cpp
     tests/test_gte.cpp
     tests/test_irq.cpp
+    tests/test_mdec.cpp
     tests/test_raster.cpp
     tests/test_scheduler.cpp
     tests/test_sio.cpp

@@ -213,6 +213,8 @@ namespace {
 u32 read_from_device(Bus& bus, u32 channel, u32 address, u32 remaining)
 {
     switch (static_cast<Dma::Port>(channel)) {
+    case Dma::Port::MdecOut:
+        return bus.mdec.read_data();
     case Dma::Port::Otc:
         // Channel 6 has no device behind it. The controller builds an
         // ordering table: a chain running backwards through RAM, each
@@ -246,6 +248,9 @@ u32 read_from_device(Bus& bus, u32 channel, u32 address, u32 remaining)
 void write_to_device(Bus& bus, u32 channel, u32 word)
 {
     switch (static_cast<Dma::Port>(channel)) {
+    case Dma::Port::MdecIn:
+        bus.mdec.write_data(word);
+        break;
     case Dma::Port::Gpu:
         bus.gpu.write_gp0(word);
         break;
@@ -264,7 +269,8 @@ void report_unserved(Bus& bus, u32 channel)
 {
     const auto port = static_cast<Dma::Port>(channel);
     if (port == Dma::Port::Gpu || port == Dma::Port::Otc ||
-        port == Dma::Port::CdRom || port == Dma::Port::Spu) {
+        port == Dma::Port::CdRom || port == Dma::Port::Spu ||
+        port == Dma::Port::MdecIn || port == Dma::Port::MdecOut) {
         return;
     }
     if (bus.note_unhandled(Dma::BASE + channel)) {

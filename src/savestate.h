@@ -24,7 +24,7 @@
 // at the front makes a mismatch an error rather than a mystery.
 struct State {
     static constexpr u32 MAGIC = 0x42424F57;  // "WOBB"
-    static constexpr u32 VERSION = 4;
+    static constexpr u32 VERSION = 5;
 
     bool saving = true;
     std::vector<u8> bytes;
@@ -52,6 +52,27 @@ struct State {
         static_assert(std::is_trivially_copyable_v<T>,
                       "state arrays must hold flat data");
         raw(values.data(), sizeof(T) * N);
+    }
+
+    // A queue with no fixed depth. The count goes in front so a load
+    // knows how much to take, and a count larger than what is left of
+    // the buffer is a foreign file rather than a long queue — reading
+    // it would ask for the memory the file claims instead of the
+    // memory it has.
+    template <typename T> void operator()(std::vector<T>& values)
+    {
+        static_assert(std::is_trivially_copyable_v<T>,
+                      "state vectors must hold flat data");
+        u32 count = static_cast<u32>(values.size());
+        (*this)(count);
+        if (!saving) {
+            if (!ok || count > (bytes.size() - position) / sizeof(T)) {
+                ok = false;
+                return;
+            }
+            values.resize(count);
+        }
+        raw(values.data(), sizeof(T) * count);
     }
 
     void operator()(std::string& text);

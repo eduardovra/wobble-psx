@@ -19,6 +19,7 @@ void Console::reset()
     bus.sio.reset();
     bus.spu.reset();
     bus.timers.reset();
+    bus.mdec.reset();
     scheduler.reset();
     frames = 0;
     scheduler.schedule_in(EventKind::Hblank, Gpu::CYCLES_PER_SCANLINE);

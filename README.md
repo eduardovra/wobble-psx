@@ -54,7 +54,37 @@ decompression is [libchdr](https://github.com/rtissera/libchdr)'s,
 which is what MAME reads the format with.
 
 Games boot, run their startup, draw and make sound. None is playable
-yet. The MDEC that decodes full-motion video is missing entirely.
+yet.
+
+## Video
+
+The MDEC decodes. It is the console's video codec with the front half
+taken off — dequantise, inverse DCT, colour space conversion — and the
+Huffman coding a movie is really stored in is undone by the CPU before
+anything reaches it, which is how the console did it too.
+
+Both monochrome depths and both colour ones are there, along with the
+quantisation and scale tables a game loads before a movie, and both DMA
+channels, so a frame can arrive and leave without the CPU touching a
+word of it. `mdec/frame` from ps1-tests decodes to the photograph a
+console decodes it to, `mdec/step-by-step-log` — which feeds the
+decoder by hand and reads the status register at every step — comes out
+with the same image, and `mdec/movie` plays. A snapshot of the last of
+those cannot be compared with the console's, since it is an animation
+and the two are never at the same instant of it.
+
+What is not the same is the last bit of arithmetic. Against the
+24-bit reference frame, 88% of the bytes are what hardware produced and
+97% are within one of it — the inverse DCT here keeps its full product
+and rounds once, where the hardware's rounds somewhere inside, and
+nobody has worked out where. It is a step of brightness on some pixels
+of a photograph and cannot be seen in a moving one.
+
+The timing is not the hardware's either. A real MDEC decodes while the
+data-in channel is still feeding it and stalls that channel when it
+gets ahead; here a word is decoded the moment it is written, because a
+DMA transfer runs to completion inside the store that starts one.
+Software sees the same words in the same order, and sooner.
 
 ## Sound
 
