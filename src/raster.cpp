@@ -79,6 +79,12 @@ s32 edge(const Vertex& a, const Vertex& b, s32 x, s32 y)
 // weights describe. No perspective correction: the GPU has no depth to
 // correct by, which is where the console's sliding textures come from
 // and half the reason its graphics look the way they do.
+//
+// The division rounds rather than truncating. Truncating loses half a
+// unit on average and only ever downwards, which is invisible in the
+// eight bits the arithmetic is done in and shows up in the five a
+// pixel is stored as: near enough one pixel in twelve came out a whole
+// shade dark, never light, across the whole of every gradient.
 u32 interpolate(const std::array<s32, 3>& weight,
                 const std::array<u32, 3>& corner,
                 s32 area)
@@ -86,7 +92,7 @@ u32 interpolate(const std::array<s32, 3>& weight,
     const s32 sum = weight[0] * static_cast<s32>(corner[0]) +
         weight[1] * static_cast<s32>(corner[1]) +
         weight[2] * static_cast<s32>(corner[2]);
-    return static_cast<u32>(sum / area);
+    return static_cast<u32>((sum + area / 2) / area);
 }
 
 // Blends what is being drawn with what is already there, in one of the
