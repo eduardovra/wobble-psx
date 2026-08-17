@@ -110,6 +110,9 @@ constexpr u32 flag_colour_saturated(u32 index) { return 1u << (22 - index); }
 constexpr s64 MAC_MAX = (s64{1} << 43) - 1;
 constexpr s64 MAC_MIN = -(s64{1} << 43);
 
+// What is left of a 64-bit word once the accumulator has had its 44.
+constexpr u32 MAC_UNUSED_BITS = 20;
+
 constexpr s32 IR_MAX = 0x7FFF;
 constexpr s32 IR_MIN = -0x8000;
 constexpr s32 IR0_MAX = 0x1000;
@@ -287,6 +290,23 @@ void Gte::set_mac(u32 index, s64 value, u32 shift)
     mac[index] = static_cast<s32>(value >> shift);
 }
 
+// A sum is checked as it is built rather than once at the end, because
+// that is where the hardware can see it: a term that carries the total
+// out of range sets the flag even if a later one brings it back, and a
+// sum that leaves in both directions leaves both flags behind.
+s64 Gte::accumulate(u32 index, s64 sum, s64 term)
+{
+    const s64 total = sum + term;
+    if (total > MAC_MAX) {
+        flag |= flag_mac_positive(index);
+    } else if (total < MAC_MIN) {
+        flag |= flag_mac_negative(index);
+    }
+    // 44 bits is all there is to hold it; anything above is dropped and
+    // the sign taken from the top of what remains.
+    return (total << MAC_UNUSED_BITS) >> MAC_UNUSED_BITS;
+}
+
 s32 Gte::set_mac0(s64 value)
 {
     if (value > INT32_MAX) {
@@ -313,7 +333,7 @@ void Gte::set_mac_and_ir(u32 index, s64 value, const Modifiers& modifiers)
     set_ir(index, mac[index], modifiers.clamp_positive);
 }
 
-void Gte::push_screen(s32 x, s32 y)
+void Gte::push_screen(s64 x, s64 y)
 {
     if (x < SCREEN_MIN || x > SCREEN_MAX) {
         flag |= FLAG_SX2_SATURATED;
@@ -323,8 +343,8 @@ void Gte::push_screen(s32 x, s32 y)
     }
     sxy[0] = sxy[1];
     sxy[1] = sxy[2];
-    sxy[2] = {static_cast<s16>(std::clamp(x, SCREEN_MIN, SCREEN_MAX)),
-              static_cast<s16>(std::clamp(y, SCREEN_MIN, SCREEN_MAX))};
+    sxy[2] = {static_cast<s16>(std::clamp<s64>(x, SCREEN_MIN, SCREEN_MAX)),
+              static_cast<s16>(std::clamp<s64>(y, SCREEN_MIN, SCREEN_MAX))};
 }
 
 void Gte::push_depth(s64 value)
@@ -342,7 +362,11 @@ void Gte::push_colour()
 {
     std::array<u8, 4> entry{};
     for (u32 i = 0; i < 3; i++) {
-        const s32 value = mac[i + 1] / 16;
+        // Shifted rather than divided: the hardware drops four bits,
+        // which for a negative value rounds down and not towards zero.
+        // A colour just below black divides to exactly 0 and looks in
+        // range, where the shift keeps it negative and saturates.
+        const s32 value = mac[i + 1] >> 4;
         if (value < 0 || value > COLOUR_MAX) {
             flag |= flag_colour_saturated(i + 1);
         }
@@ -361,9 +385,10 @@ void Gte::transform(const Matrix& mx,
                     const Modifiers& modifiers)
 {
     for (u32 row = 0; row < 3; row++) {
-        s64 value = s64{tr[row]} * ONE;
+        s64 value = accumulate(row + 1, 0, s64{tr[row]} * ONE);
         for (u32 column = 0; column < 3; column++) {
-            value += s64{mx[row][column]} * vec[column];
+            value =
+                accumulate(row + 1, value, s64{mx[row][column]} * vec[column]);
         }
         set_mac_and_ir(row + 1, value, modifiers);
     }
@@ -438,16 +463,17 @@ void Gte::project(u32 vertex, const Modifiers& modifiers)
     const std::array<s16, 3>& vec = v[vertex];
 
     for (u32 row = 0; row < 2; row++) {
-        s64 value = s64{tr[row]} * ONE;
+        s64 value = accumulate(row + 1, 0, s64{tr[row]} * ONE);
         for (u32 column = 0; column < 3; column++) {
-            value += s64{rotation[row][column]} * vec[column];
+            value = accumulate(
+                row + 1, value, s64{rotation[row][column]} * vec[column]);
         }
         set_mac_and_ir(row + 1, value, modifiers);
     }
 
-    s64 depth = s64{tr[2]} * ONE;
+    s64 depth = accumulate(3, 0, s64{tr[2]} * ONE);
     for (u32 column = 0; column < 3; column++) {
-        depth += s64{rotation[2][column]} * vec[column];
+        depth = accumulate(3, depth, s64{rotation[2][column]} * vec[column]);
     }
     set_mac(3, depth, modifiers.shift);
 
@@ -456,7 +482,14 @@ void Gte::project(u32 vertex, const Modifiers& modifiers)
     // clamped is decided from the depth *before* the command's shift.
     // With sf=0 the two disagree, and code that checks FLAG sees the
     // answer the hardware gives rather than the tidy one.
-    const s64 unshifted = depth >> FRACTION_BITS;
+    //
+    // The accumulator is 44 bits and the register it lands in is 32,
+    // so the shifted depth is narrowed on the way — and a depth too
+    // large to fit comes back wrapped, often negative, which is what
+    // puts the vertex behind the camera rather than infinitely far in
+    // front of it. The shift comes first: it is the shifted value that
+    // has to fit, not the accumulator.
+    const s64 unshifted = static_cast<s32>(depth >> FRACTION_BITS);
     if (unshifted < IR_MIN || unshifted > IR_MAX) {
         flag |= flag_ir_saturated(3);
     }
@@ -467,19 +500,31 @@ void Gte::project(u32 vertex, const Modifiers& modifiers)
 
     // Perspective: divide by the depth, and scale the projected vector
     // by the result. The screen offsets are in 16.16, which is why the
-    // coordinates come out of MAC0's top half.
+    // coordinates come out of the top half.
+    //
+    // They are taken from the full result rather than from MAC0, which
+    // is only 32 bits wide. A vertex projected far enough off screen
+    // overflows that register — and the coordinate the hardware then
+    // saturates is the one it computed, not the wrapped remains left
+    // behind. Reading it back through MAC0 turns a point way off to
+    // one side into one a couple of pixels from the origin.
     const s64 factor = perspective_divide();
-    const s32 x = set_mac0(factor * ir[1] + ofx) >> 16;
-    const s32 y = set_mac0(factor * ir[2] + ofy) >> 16;
-    push_screen(x, y);
+    const s64 screen_x = factor * ir[1] + ofx;
+    const s64 screen_y = factor * ir[2] + ofy;
+    set_mac0(screen_x);
+    set_mac0(screen_y);
+    push_screen(screen_x >> 16, screen_y >> 16);
 
     // Depth cueing rides on the same reciprocal: how much fog this
-    // vertex gets is linear in its distance.
-    const s32 fog = set_mac0(factor * dqa + dqb) >> FRACTION_BITS;
+    // vertex gets is linear in its distance. Saturated from the whole
+    // result too, for the same reason.
+    const s64 depth_cue = factor * dqa + dqb;
+    set_mac0(depth_cue);
+    const s64 fog = depth_cue >> FRACTION_BITS;
     if (fog < 0 || fog > IR0_MAX) {
         flag |= FLAG_IR0_SATURATED;
     }
-    ir[0] = static_cast<s16>(std::clamp(fog, 0, IR0_MAX));
+    ir[0] = static_cast<s16>(std::clamp<s64>(fog, 0, IR0_MAX));
 }
 
 void Gte::light(u32 vertex, const Modifiers& modifiers)

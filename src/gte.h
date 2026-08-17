@@ -144,6 +144,10 @@ private:
     // Stores a 44-bit accumulator result, flagging the overflow if it
     // did not fit, and shifting it down to the 32 bits MAC holds.
     void set_mac(u32 index, s64 value, u32 shift);
+
+    // Adds one term into a 44-bit accumulator, flagging what would not
+    // fit and returning the total as the hardware keeps it.
+    s64 accumulate(u32 index, s64 sum, s64 term);
     s32 set_mac0(s64 value);
 
     // Clamps into IR, flagging if it had to.
@@ -151,7 +155,7 @@ private:
     void set_mac_and_ir(u32 index, s64 value, const Modifiers& modifiers);
 
     // The three FIFOs, each pushed from the accumulators.
-    void push_screen(s32 x, s32 y);
+    void push_screen(s64 x, s64 y);
     void push_depth(s64 value);
     void push_colour();
 
