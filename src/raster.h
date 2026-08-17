@@ -37,6 +37,15 @@ void draw_triangle(Gpu& gpu,
                    const std::array<Vertex, 3>& corners,
                    const Shading& how);
 
+// A line between two corners. It has no inside, so it is not built
+// from triangles: the GPU walks it a pixel at a time along whichever
+// axis it covers more of. Never textured — the command family has no
+// bit for it — but it may be shaded from one end to the other.
+void draw_line(Gpu& gpu,
+               const Vertex& from,
+               const Vertex& to,
+               const Shading& how);
+
 // An axis-aligned rectangle. It needs no interpolation at all: one
 // flat colour, or a texture walked at one texel per pixel.
 void draw_rectangle(

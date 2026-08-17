@@ -370,11 +370,89 @@ void draw_triangle(Gpu& gpu,
     }
 }
 
+void draw_line(Gpu& gpu,
+               const Vertex& from,
+               const Vertex& to,
+               const Shading& how)
+{
+    const s32 dx = to.x - from.x;
+    const s32 dy = to.y - from.y;
+
+    // Too long to draw rather than too long to fit: the GPU abandons a
+    // line that spans more than VRAM instead of clipping it down.
+    if (std::abs(dx) >= static_cast<s32>(Gpu::VRAM_WIDTH) ||
+        std::abs(dy) >= static_cast<s32>(Gpu::VRAM_HEIGHT)) {
+        return;
+    }
+
+    const DrawState state = prepare(gpu, how);
+    const Rgb start = from_command(from.colour);
+    const Rgb finish = from_command(to.colour);
+
+    // One step per pixel along whichever axis the line covers more of,
+    // so the other axis moves less than a pixel at a time and leaves no
+    // gaps. Kept in 16.16, since a shallow slope is mostly fraction.
+    constexpr u32 FRACTION = 16;
+    const s32 steps = std::max(std::abs(dx), std::abs(dy));
+    const s64 step_x = steps == 0 ? 0 : (s64{dx} << FRACTION) / steps;
+    const s64 step_y = steps == 0 ? 0 : (s64{dy} << FRACTION) / steps;
+
+    s64 x = s64{from.x} << FRACTION;
+    s64 y = s64{from.y} << FRACTION;
+
+    for (s32 step = 0; step <= steps; step++) {
+        const s32 px = static_cast<s32>(x >> FRACTION);
+        const s32 py = static_cast<s32>(y >> FRACTION);
+        x += step_x;
+        y += step_y;
+
+        const bool inside = px >= static_cast<s32>(state.clip_left) &&
+            px <= static_cast<s32>(state.clip_right) &&
+            py >= static_cast<s32>(state.clip_top) &&
+            py <= static_cast<s32>(state.clip_bottom);
+        if (!inside) {
+            continue;
+        }
+
+        // Shading along a line is one weight and its complement, not
+        // the three a face needs. Rounded for the same reason.
+        Rgb colour = start;
+        if (how.gouraud && steps != 0) {
+            const auto mix = [&](u32 first, u32 second) {
+                const s32 sum = static_cast<s32>(first) * (steps - step) +
+                    static_cast<s32>(second) * step;
+                return static_cast<u32>((sum + steps / 2) / steps);
+            };
+            colour = {mix(start.r, finish.r),
+                      mix(start.g, finish.g),
+                      mix(start.b, finish.b)};
+        }
+
+        put(gpu,
+            state,
+            static_cast<u32>(px),
+            static_cast<u32>(py),
+            colour,
+            how.translucent);
+    }
+}
+
 void draw_rectangle(
     Gpu& gpu, const Vertex& corner, u32 width, u32 height, const Shading& how)
 {
     const DrawState state = prepare(gpu, how);
     const Rgb tint = from_command(corner.colour);
+
+    // GP0(E1h) bits 12 and 13 turn a textured rectangle's texture round
+    // without needing a second copy of it stored the other way. They
+    // belong to the draw mode rather than to the command, and they are
+    // a rectangle's alone: a polygon carries its own coordinates for
+    // each corner and can be turned round by giving them in the other
+    // order, so the hardware offers it nothing here.
+    constexpr u32 FLIP_X = 1u << 12;
+    constexpr u32 FLIP_Y = 1u << 13;
+    const bool flip_x = (gpu.draw_mode & FLIP_X) != 0;
+    const bool flip_y = (gpu.draw_mode & FLIP_Y) != 0;
 
     for (u32 row = 0; row < height; row++) {
         const s32 y = corner.y + static_cast<s32>(row);
@@ -393,9 +471,11 @@ void draw_rectangle(
             bool translucent = how.translucent;
             if (how.textured) {
                 // A sprite's texture is walked one texel to the pixel
-                // from its corner, with no interpolation to get wrong.
-                const Texel texel = shade_texel(
-                    gpu, state, how, corner.u + column, corner.v + row, tint);
+                // from its corner, with no interpolation to get wrong —
+                // backwards from it when that axis is flipped.
+                const u32 u = flip_x ? corner.u - column : corner.u + column;
+                const u32 v = flip_y ? corner.v - row : corner.v + row;
+                const Texel texel = shade_texel(gpu, state, how, u, v, tint);
                 if (!texel.drawn) {
                     continue;
                 }

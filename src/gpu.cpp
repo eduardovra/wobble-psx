@@ -186,6 +186,11 @@ void Gpu::visit_state(State& state)
     state(gpuread_latch);
     state(command);
     state(command_words);
+    state(polyline_x);
+    state(polyline_y);
+    state(polyline_colour);
+    state(polyline_next_colour);
+    state(polyline_has_colour);
 }
 
 void Gpu::reset()
@@ -212,6 +217,11 @@ void Gpu::reset()
     scanline = 0;
     odd_field = false;
     gpuread_latch = 0;
+    polyline_x = 0;
+    polyline_y = 0;
+    polyline_colour = 0;
+    polyline_next_colour = 0;
+    polyline_has_colour = false;
     // VRAM survives a reset on hardware, so it is not cleared here.
 }
 
@@ -357,7 +367,9 @@ void Gpu::write_gp0(u32 word)
     case Gp0Mode::PolyLine:
         if ((word & POLYLINE_END_MASK) == POLYLINE_END) {
             mode = Gp0Mode::Command;
+            return;
         }
+        extend_polyline(word);
         return;
 
     case Gp0Mode::ImageStore:
@@ -433,13 +445,14 @@ void Gpu::execute_gp0()
     } else if (op >= 0xC0 && op <= 0xDF) {
         begin_transfer();
         mode = Gp0Mode::ImageStore;
-    } else if (op >= 0x48 && op <= 0x5F) {
-        // A line command with bit 3 set is a polyline: the vertices
-        // already collected are the first two, and the rest follow
-        // until the terminator.
-        mode = Gp0Mode::PolyLine;
+    } else if (op >= 0x40 && op <= 0x5F) {
+        draw_line_command();
+        // Bit 3 makes it a polyline: the two vertices collected are the
+        // first segment, and the rest follow until the terminator.
+        if ((op & 0x08) != 0) {
+            mode = Gp0Mode::PolyLine;
+        }
     }
-    // Lines are the remainder, and are still counted off and dropped.
 }
 
 // A vertex word is a signed pair packed into a word, eleven bits each
@@ -502,6 +515,66 @@ void Gpu::draw_polygon()
         // them in — hence the fan rather than a loop.
         draw_triangle(*this, {shape[1], shape[2], shape[3]}, how);
     }
+}
+
+// A line command carries both its ends. Only the shaded form gives the
+// second end a colour of its own; the flat form draws the whole line in
+// the colour that came with the command byte.
+void Gpu::draw_line_command()
+{
+    const u32 op = command[0] >> 24;
+    Shading how = shading_of(op);
+    how.textured = false;  // no line command has a texture
+
+    Vertex from = vertex_at(command[1]);
+    from.colour = command[0] & 0xFFFFFF;
+
+    Vertex to;
+    if (how.gouraud) {
+        to = vertex_at(command[3]);
+        to.colour = command[2] & 0xFFFFFF;
+    } else {
+        to = vertex_at(command[2]);
+        to.colour = from.colour;
+    }
+
+    draw_line(*this, from, to, how);
+
+    polyline_x = to.x;
+    polyline_y = to.y;
+    polyline_colour = to.colour;
+    polyline_has_colour = false;
+}
+
+// One more vertex of a polyline, drawn as a segment from wherever the
+// last one left off. A shaded polyline sends a colour ahead of each
+// position, so a word is only a vertex once a colour is waiting.
+void Gpu::extend_polyline(u32 word)
+{
+    const u32 op = command[0] >> 24;
+    Shading how = shading_of(op);
+    how.textured = false;
+
+    if (how.gouraud && !polyline_has_colour) {
+        polyline_next_colour = word & 0xFFFFFF;
+        polyline_has_colour = true;
+        return;
+    }
+
+    Vertex from;
+    from.x = polyline_x;
+    from.y = polyline_y;
+    from.colour = polyline_colour;
+
+    Vertex to = vertex_at(word);
+    to.colour = how.gouraud ? polyline_next_colour : polyline_colour;
+    polyline_has_colour = false;
+
+    draw_line(*this, from, to, how);
+
+    polyline_x = to.x;
+    polyline_y = to.y;
+    polyline_colour = to.colour;
 }
 
 void Gpu::draw_sprite()

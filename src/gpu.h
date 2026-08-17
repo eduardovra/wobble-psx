@@ -78,6 +78,11 @@ struct Gpu {
     u32 gated_draw_mode(u32 value) const;
     void apply_texpage(u32 attribute);
 
+    // The two halves of drawing a line family command: the command
+    // itself, and each further vertex of a polyline.
+    void draw_line_command();
+    void extend_polyline(u32 word);
+
     // The clipping rectangle GP0(E3h) and GP0(E4h) set, and the shift
     // GP0(E5h) applies to every vertex. All three are kept as the words
     // software wrote, so this is where they are taken apart. The two
@@ -166,6 +171,15 @@ struct Gpu {
     u32 draw_offset = 0;       // GP0(E5h)
     u32 mask_setting = 0;      // GP0(E6h), two bits
     u32 display_mode = 0;      // GP1(08h)
+
+    // Where a polyline has got to: the segment just drawn ended here,
+    // and the next one starts from it. A shaded polyline sends a colour
+    // ahead of each position, so one may be waiting for its vertex.
+    s32 polyline_x = 0;
+    s32 polyline_y = 0;
+    u32 polyline_colour = 0;
+    u32 polyline_next_colour = 0;
+    bool polyline_has_colour = false;
 
     // GP1(09h). Whether the draw mode's texture-disable bit is allowed
     // to mean anything: with this off, the bit is dropped as it is
