@@ -372,6 +372,30 @@ TEST_CASE("the CPU moves values in and out of the geometry engine")
     CHECK_FALSE(machine.cpu.halted);
 }
 
+TEST_CASE("the CPU names the control registers from the start of their file")
+{
+    using namespace mips;
+
+    Machine machine;
+    // CTC2 $t0, cop2c0 then CFC2 $t1, cop2c0. Control register 0 is
+    // cop2r32, the first word of the rotation matrix.
+    constexpr u32 CTC2 = 0x48C00000 | (t0 << 16) | (0 << 11);
+    constexpr u32 CFC2 = 0x48400000 | (t1 << 16) | (0 << 11);
+    machine.load({
+        lui(t0, 0x0002),
+        ori(t0, t0, 0x0001),
+        CTC2,
+        CFC2,
+        nop(),
+    });
+    machine.run(5);
+
+    CHECK(machine.cpu.gte.matrix[0][0][0] == 1);
+    CHECK(machine.cpu.gte.matrix[0][0][1] == 2);
+    CHECK(machine.reg(t1) == 0x00020001);
+    CHECK_FALSE(machine.cpu.halted);
+}
+
 TEST_CASE("a geometry operation runs from an ordinary instruction")
 {
     Machine machine;

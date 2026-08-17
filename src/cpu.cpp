@@ -798,18 +798,23 @@ void Cpu::execute_cop2(u32 instr)
         return;
     }
 
+    // The engine's control registers are cop2r32..63, but CFC2 and CTC2
+    // name them by their place in the control file, which starts over
+    // at zero.
+    constexpr u32 CONTROL_BASE = 32;
+
     switch (rs(instr)) {
     case 0x00:  // MFC2 (value arrives via the load delay slot)
         schedule_load(rt(instr), gte.read_data(rd(instr)));
         break;
     case 0x02:  // CFC2
-        schedule_load(rt(instr), gte.read_control(rd(instr)));
+        schedule_load(rt(instr), gte.read_control(rd(instr) + CONTROL_BASE));
         break;
     case 0x04:  // MTC2
         gte.write_data(rd(instr), reg(rt(instr)));
         break;
     case 0x06:  // CTC2
-        gte.write_control(rd(instr), reg(rt(instr)));
+        gte.write_control(rd(instr) + CONTROL_BASE, reg(rt(instr)));
         break;
     default:
         halt(std::format("unhandled COP2 {:08X} at {:08X}", instr, current_pc));
