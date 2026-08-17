@@ -277,6 +277,7 @@ constexpr const char* HELP =
     "disc <file>        put a disc in the drive (.zip, .cue, .bin)\n"
     "exe <file>         boot the BIOS, then run a PS-EXE on it\n"
     "screen <file>      write what the display shows, as a PPM\n"
+    "vram <file>        write the whole of VRAM, as a PPM\n"
     "audio <on|off>     record what the SPU plays\n"
     "audio <file>       write what has been recorded, as a WAV\n"
     "save <file>        write a save state\n"
@@ -318,6 +319,38 @@ std::string write_screen(const Gpu& gpu, const std::string& path)
                        width,
                        height,
                        gpu.display_disabled ? " (display is blanked)" : "");
+}
+
+// The same, for the whole of VRAM rather than the part of it being
+// shown. A picture of the display says whether something looks right;
+// a picture of VRAM says what was actually drawn, textures and palettes
+// and back buffers included, which is what a test with a reference
+// image of its own is comparing against. The mask bit has no colour and
+// is not in here.
+std::string write_vram(const Gpu& gpu, const std::string& path)
+{
+    std::ofstream file(path, std::ios::binary);
+    if (!file) {
+        return "could not open that file\n";
+    }
+    file << "P6\n" << Gpu::VRAM_WIDTH << " " << Gpu::VRAM_HEIGHT << "\n255\n";
+
+    // Five bits to eight the same way the display does it, so a pixel
+    // looks the same whichever picture it is found in.
+    const auto stretch = [](u32 value) {
+        return static_cast<char>((value << 3) | (value >> 2));
+    };
+
+    std::string pixels;
+    pixels.reserve(Gpu::VRAM_PIXELS * 3);
+    for (const u16 pixel : gpu.vram) {
+        pixels += stretch(pixel & 0x1F);
+        pixels += stretch((pixel >> 5) & 0x1F);
+        pixels += stretch((pixel >> 10) & 0x1F);
+    }
+    file.write(pixels.data(), static_cast<std::streamsize>(pixels.size()));
+
+    return std::format("wrote {}x{}\n", Gpu::VRAM_WIDTH, Gpu::VRAM_HEIGHT);
 }
 
 // Writes what has been recorded as a WAV: a forty-four byte header and
@@ -839,6 +872,14 @@ std::string Debugger::execute(Console& console, const std::string& line)
             return "screen needs a filename\n";
         }
         return write_screen(console.bus.gpu, path);
+    }
+
+    if (command == "vram") {
+        const std::string path = filename();
+        if (path.empty()) {
+            return "vram needs a filename\n";
+        }
+        return write_vram(console.bus.gpu, path);
     }
 
     if (command == "audio") {

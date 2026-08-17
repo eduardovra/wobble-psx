@@ -1,6 +1,7 @@
 #include "raster.h"
 
 #include <algorithm>
+#include <array>
 #include <cstddef>
 #include <utility>
 #include <vector>
@@ -39,12 +40,29 @@ Rgb from_pixel(u16 pixel)
             static_cast<u32>((pixel >> 10) & 0x1F) << 3};
 }
 
-u16 to_pixel(const Rgb& colour)
+// The ordered dither the GPU adds before it throws away the low three
+// bits of each channel, indexed by the pixel's position. Software turns
+// it on in GP0(E1h); it costs the hardware nothing and spreads a
+// gradient that would otherwise band across only 32 levels.
+constexpr std::array<std::array<s32, 4>, 4> DITHER = {{
+    {-4, +0, -3, +1},
+    {+2, -2, +3, -1},
+    {-3, +1, -4, +0},
+    {+3, -1, +2, -2},
+}};
+
+// The offset is added before the channel is clamped, not after, so a
+// channel already at full brightness can still be dithered downwards.
+u16 to_pixel(const Rgb& colour, s32 offset)
 {
-    const u32 r = std::min(colour.r, CHANNEL_MAX) >> 3;
-    const u32 g = std::min(colour.g, CHANNEL_MAX) >> 3;
-    const u32 b = std::min(colour.b, CHANNEL_MAX) >> 3;
-    return static_cast<u16>((b << 10) | (g << 5) | r);
+    const auto channel = [offset](u32 value) {
+        const s32 shifted = static_cast<s32>(value) + offset;
+        const s32 limited =
+            std::clamp(shifted, 0, static_cast<s32>(CHANNEL_MAX));
+        return static_cast<u32>(limited) >> 3;
+    };
+    return static_cast<u16>((channel(colour.b) << 10) |
+                            (channel(colour.g) << 5) | channel(colour.r));
 }
 
 // Which side of the line through a and b the point lies on, scaled by
@@ -119,6 +137,7 @@ struct DrawState {
 
     u32 blend_mode = 0;
     bool check_mask = false;
+    bool dither = false;
     u16 set_mask = 0;
 };
 
@@ -153,6 +172,13 @@ DrawState prepare(const Gpu& gpu, const Shading& how)
 
     state.check_mask = (gpu.mask_setting & 2) != 0;
     state.set_mask = (gpu.mask_setting & 1) != 0 ? MASK_BIT : 0;
+
+    // GP0(E1h) bit 9 asks for the dither, but only a primitive with a
+    // gradient across it gets one. A flat fill and a raw texture are
+    // already the colours they will be stored as, and dithering them
+    // would add noise to something that has no banding to hide.
+    const bool graded = how.gouraud || (how.textured && !how.raw);
+    state.dither = ((gpu.draw_mode >> 9) & 1) != 0 && graded;
     return state;
 }
 
@@ -209,7 +235,8 @@ void put(Gpu& gpu,
     if (translucent) {
         colour = blend(state.blend_mode, from_pixel(behind), colour);
     }
-    gpu.vram[at] = to_pixel(colour) | state.set_mask;
+    const s32 offset = state.dither ? DITHER[y & 3][x & 3] : 0;
+    gpu.vram[at] = to_pixel(colour, offset) | state.set_mask;
 }
 
 // What one texel comes to once the primitive's colour has been applied
@@ -382,7 +409,7 @@ void draw_rectangle(
 
 void fill_vram(Gpu& gpu, u32 x, u32 y, u32 width, u32 height, u32 colour)
 {
-    const u16 pixel = to_pixel(from_command(colour));
+    const u16 pixel = to_pixel(from_command(colour), 0);
     for (u32 row = 0; row < height; row++) {
         const std::size_t at =
             std::size_t{(y + row) % Gpu::VRAM_HEIGHT} * Gpu::VRAM_WIDTH;
