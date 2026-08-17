@@ -11,6 +11,7 @@
 #include "irq.h"
 #include "scheduler.h"
 #include "sio.h"
+#include "spu.h"
 #include "timers.h"
 #include "types.h"
 
@@ -27,11 +28,12 @@ struct State;
 //   0x1F801000  8 KB   hardware registers — GPU, SPU, DMA, timers…
 //   0x1FC00000  512 KB BIOS ROM
 //
-// So far RAM, the BIOS, the interrupt controller, the GPU's ports, the
-// DMA controller, the CD-ROM and the controller port are real; the rest
-// of the register range reads as zero and swallows writes, which is
-// enough to get the BIOS booting. The scratchpad is among the missing —
-// nothing has asked for it yet.
+// So far RAM, the scratchpad, the BIOS, the interrupt controller, the
+// GPU's ports, the DMA controller, the CD-ROM, the controller port and
+// the SPU's register side are real; the rest of the register range
+// reads as zero and swallows writes. The MDEC, which decodes the
+// compressed video a game plays between levels, is the largest thing
+// still missing.
 struct Bus {
     // The clock comes in from outside because the bus does not own it:
     // the CPU drives it forward, and the devices behind here are timed
@@ -41,6 +43,13 @@ struct Bus {
 
     static constexpr u32 RAM_SIZE = 2 * 1024 * 1024;
     static constexpr u32 BIOS_SIZE = 512 * 1024;
+
+    // The scratchpad: the data cache the R3000A would have had, wired
+    // up as a kilobyte of directly addressed fast memory instead.
+    // Games use it for whatever they touch most in an inner loop, so a
+    // machine without it does not run slowly — it runs wrong.
+    static constexpr u32 SCRATCHPAD_START = 0x1F800000;
+    static constexpr u32 SCRATCHPAD_SIZE = 1024;
 
     // What a load costs, by region, in CPU cycles — hardware
     // measurements taken from psx-spx's "Load Timing". Each figure
@@ -91,8 +100,13 @@ struct Bus {
     // the middle of a register falls through to the unimplemented
     // default instead of returning a shifted value. Nothing does that
     // to the registers implemented so far.
-    bool read_io(u32 phys, u32& value);
-    bool write_io(u32 phys, u32 value);
+    //
+    // `width` is in bytes, and matters to one device: the SPU's
+    // registers are sixteen bits each, so a word access to it is two
+    // registers rather than one wide one, and the pair that starts a
+    // voice is written both halves at once.
+    bool read_io(u32 phys, u32& value, u32 width);
+    bool write_io(u32 phys, u32 value, u32 width);
 
     // Cycles the accesses made so far have stalled the CPU for, over
     // and above the one cycle the instruction itself costs. The CPU
@@ -114,6 +128,7 @@ struct Bus {
 
     std::array<u8, RAM_SIZE> ram{};
     std::array<u8, BIOS_SIZE> bios{};
+    std::array<u8, SCRATCHPAD_SIZE> scratchpad{};
 
     Scheduler& scheduler;
 
@@ -122,6 +137,7 @@ struct Bus {
     Dma dma;
     CdRom cdrom;
     Sio sio;
+    Spu spu;
     Timers timers;
 
     // Bounded by the number of distinct unhandled addresses a game

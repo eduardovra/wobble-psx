@@ -3,6 +3,7 @@
 #include <array>
 #include <initializer_list>
 
+#include "disc.h"
 #include "types.h"
 
 struct State;
@@ -25,10 +26,17 @@ struct State;
 // it — Init, or a seek — answers twice, an INT3 saying it was heard and
 // an INT2 saying it is done.
 //
-// The drive is empty. That is a state a real console can be in rather
-// than a gap here: GetID answers INT5 with the "no disc" reason, and it
-// is that answer which sends the BIOS to its shell. A disc would fill
-// the data FIFO, which is why reads of it return nothing yet.
+// An empty drive is a state a real console can be in rather than a gap
+// here: GetID answers INT5 with the "no disc" reason, and it is that
+// answer which sends the BIOS to its shell instead of into a game.
+//
+// With a disc in it the drive also reads. A read is not a command that
+// answers once: ReadN acknowledges, and then a sector arrives as an
+// INT1 every time one passes under the head — 75 a second, or 150 at
+// double speed — until something stops it. The sector waits in a
+// buffer until software asks for it by writing the request register,
+// and is then taken a byte at a time out of the data FIFO, or by the
+// DMA channel that does the same thing faster.
 struct CdRom {
     static constexpr u32 BASE = 0x1F801800;
     static constexpr u32 END = 0x1F801804;
@@ -83,11 +91,13 @@ struct CdRom {
     u8 index = 0;
 
     // The drive's own status byte, the first byte of nearly every
-    // answer. Only the spindle bit is ever set here: there is no disc
-    // to seek on, read from or play.
+    // answer: what the mechanism is doing, and whether the last thing
+    // asked of it went wrong.
     static constexpr u8 STATUS_ERROR = 1 << 0;
     static constexpr u8 STATUS_MOTOR = 1 << 1;
     static constexpr u8 STATUS_ID_ERROR = 1 << 3;
+    static constexpr u8 STATUS_READING = 1 << 5;
+    static constexpr u8 STATUS_SEEKING = 1 << 6;
     u8 status = STATUS_MOTOR;
 
     // The last Setmode, kept because Getparam reads it back.
@@ -114,8 +124,55 @@ struct CdRom {
     std::array<Response, QUEUE_CAPACITY> queue{};
     u32 queued = 0;
 
+    // The disc in the drive, if there is one. Not part of a save
+    // state, for the same reason the BIOS is not: it is the medium the
+    // state was taken from, not state itself.
+    Disc disc;
+
+    // Where Setloc has aimed the head, and which sector a read is up
+    // to. They are separate because Setloc does not move anything —
+    // the seek or the read that follows it is what acts on it.
+    u32 seek_lba = 0;
+    u32 read_lba = 0;
+    bool reading = false;
+
+    // Cycles left until the next sector passes under the head.
+    u64 sector_remaining = 0;
+
+    // The last sector read, whole, and how far through it software has
+    // got. The two are equal when the FIFO is empty, which is the
+    // state it is in until the request register asks for a sector.
+    std::array<u8, Disc::RAW_SECTOR_SIZE> sector{};
+    u32 data_cursor = 0;
+    u32 data_end = 0;
+
+    // Whether the drive has a disc that reads. Everything that would
+    // touch the medium refuses when it does not.
+    bool has_disc() const { return disc.loaded(); }
+
+    // How long one sector takes at the speed the mode register asks
+    // for. The drive turns at a constant 75 sectors a second, or twice
+    // that, which is the one piece of its timing that is mechanical
+    // and so the one games measure themselves against.
+    u64 cycles_per_sector() const;
+
+    // Takes the next byte of the current sector. Zero, and no
+    // movement, once the FIFO has been read out.
+    u8 read_data();
+
+    // Which bytes of a sector the mode register exposes: the payload
+    // alone, or the whole sector from its header on, which is how a
+    // game reads the subheader for itself.
+    u32 data_start() const;
+    u32 data_size() const;
+
 private:
     void execute(u8 command);
+
+    // Moves the read on by one sector, if one is due. Split out
+    // because it is the only part of the drive that runs without
+    // having been asked to.
+    void advance_read(u64 cycles);
 
     // Queues an answer `delay` cycles out. The parameters are read
     // during the command, not when the answer is given, so a command

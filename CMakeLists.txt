@@ -28,7 +28,17 @@ FetchContent_Declare(
     GIT_REPOSITORY https://github.com/doctest/doctest.git
     GIT_TAG v2.4.11
 )
-FetchContent_MakeAvailable(SDL3 imgui doctest)
+# Reads the zip a game is usually distributed in. Small, permissive and
+# self-contained, and it brings the archive index with it rather than
+# just the decompression — so nothing here has to parse a zip by hand.
+set(MINIZ_BUILD_TESTS OFF)
+set(MINIZ_BUILD_EXAMPLES OFF)
+FetchContent_Declare(
+    miniz
+    GIT_REPOSITORY https://github.com/richgel999/miniz.git
+    GIT_TAG 3.1.2
+)
+FetchContent_MakeAvailable(SDL3 imgui doctest miniz)
 
 add_library(imgui STATIC
     ${imgui_SOURCE_DIR}/imgui.cpp
@@ -48,13 +58,16 @@ target_link_libraries(imgui PUBLIC SDL3::SDL3)
 # The emulated machine, with no dependency on SDL or any other host
 # library, so the tests can link it without a window system.
 add_library(core STATIC
+    src/archive.cpp
     src/bus.cpp
     src/cdrom.cpp
     src/console.cpp
     src/cpu.cpp
     src/debugger.cpp
     src/disasm.cpp
+    src/disc.cpp
     src/dma.cpp
+    src/exe.cpp
     src/gdbstub.cpp
     src/gpu.cpp
     src/gte.cpp
@@ -64,9 +77,14 @@ add_library(core STATIC
     src/savestate.cpp
     src/scheduler.cpp
     src/sio.cpp
+    src/spu.cpp
     src/timers.cpp
 )
 target_include_directories(core PUBLIC src)
+# miniz ships a zlib-compatible name layer this project never calls,
+# and it warns about being unused in every file that includes it.
+target_link_libraries(core PUBLIC miniz)
+target_compile_definitions(core PUBLIC MINIZ_NO_ZLIB_COMPATIBLE_NAMES)
 
 add_executable(wobble src/main.cpp)
 target_link_libraries(wobble PRIVATE core imgui SDL3::SDL3)
@@ -78,12 +96,15 @@ target_link_libraries(wobble-dbg PRIVATE core)
 
 add_executable(tests
     tests/main.cpp
+    tests/test_archive.cpp
     tests/test_bus.cpp
     tests/test_cdrom.cpp
     tests/test_cpu.cpp
     tests/test_debugger.cpp
     tests/test_disasm.cpp
+    tests/test_disc.cpp
     tests/test_dma.cpp
+    tests/test_exe.cpp
     tests/test_gdbstub.cpp
     tests/test_gpu.cpp
     tests/test_gte.cpp
@@ -91,6 +112,7 @@ add_executable(tests
     tests/test_raster.cpp
     tests/test_scheduler.cpp
     tests/test_sio.cpp
+    tests/test_spu.cpp
     tests/test_timers.cpp
     tests/test_timing.cpp
 )

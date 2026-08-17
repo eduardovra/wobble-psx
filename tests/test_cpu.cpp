@@ -314,6 +314,38 @@ TEST_CASE("signed overflow traps and leaves the destination alone")
     CHECK_FALSE(m.cpu.halted);
 }
 
+TEST_CASE("SUB subtracts, and traps rather than wrapping")
+{
+    SUBCASE("an ordinary difference")
+    {
+        Machine m;
+        m.load({
+            addiu(t0, zero, 7),
+            addiu(t1, zero, 9),
+            sub(t2, t0, t1),
+        });
+        m.run(3);
+
+        CHECK(m.reg(t2) == static_cast<u32>(-2));
+        CHECK_FALSE(m.cpu.halted);
+    }
+
+    SUBCASE("one that will not fit")
+    {
+        Machine m;
+        m.load({
+            lui(t0, 0x8000),  // t0 = INT32_MIN
+            addiu(t1, zero, 1),
+            sub(t2, t0, t1),
+        });
+        m.run(3);
+
+        CHECK(m.exc_code() == 0xC);
+        CHECK(m.reg(t2) == 0);
+        CHECK_FALSE(m.cpu.halted);
+    }
+}
+
 TEST_CASE("an unmasked interrupt is taken before the instruction")
 {
     Machine m;

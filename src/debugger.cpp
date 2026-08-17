@@ -14,6 +14,7 @@
 #include "console.h"
 #include "disasm.h"
 #include "dma.h"
+#include "exe.h"
 #include "gpu.h"
 #include "irq.h"
 #include "sio.h"
@@ -265,6 +266,8 @@ constexpr const char* HELP =
     "trace [n]          the last n instructions retired\n"
     "tracing <on|off>   record the instruction trace\n"
     "profile <n> [top]  run n instructions, then the busiest addresses\n"
+    "disc <file>        put a disc in the drive (.zip, .cue, .bin)\n"
+    "exe <file>         boot the BIOS, then run a PS-EXE on it\n"
     "screen <file>      write what the display shows, as a PPM\n"
     "save <file>        write a save state\n"
     "load <file>        restore one\n"
@@ -414,6 +417,23 @@ std::string Debugger::execute(Console& console, const std::string& line)
             return std::nullopt;
         }
         return parse_number(words[index]);
+    };
+
+    // Everything after the command word, for the commands whose
+    // argument is a filename. A path is not a list of words however
+    // many spaces are in it, and disc images are named for the game
+    // they hold, so most of them have several.
+    auto filename = [&]() -> std::string {
+        const std::size_t start = line.find_first_not_of(" \t");
+        const std::size_t after = line.find_first_of(" \t", start);
+        if (after == std::string::npos) {
+            return "";
+        }
+        const std::size_t first = line.find_first_not_of(" \t", after);
+        if (first == std::string::npos) {
+            return "";
+        }
+        return line.substr(first, line.find_last_not_of(" \t\r\n") - first + 1);
     };
 
     auto report_stop = [&](Stop stop) {
@@ -678,11 +698,12 @@ std::string Debugger::execute(Console& console, const std::string& line)
     }
 
     if (command == "save") {
-        if (words.size() < 2) {
+        const std::string path = filename();
+        if (path.empty()) {
             return "save needs a filename\n";
         }
         const std::vector<u8> bytes = console.save_state();
-        std::ofstream file(words[1], std::ios::binary);
+        std::ofstream file(path, std::ios::binary);
         if (!file) {
             return "could not open that file\n";
         }
@@ -692,10 +713,11 @@ std::string Debugger::execute(Console& console, const std::string& line)
     }
 
     if (command == "load") {
-        if (words.size() < 2) {
+        const std::string path = filename();
+        if (path.empty()) {
             return "load needs a filename\n";
         }
-        std::ifstream file(words[1], std::ios::binary);
+        std::ifstream file(path, std::ios::binary);
         if (!file) {
             return "could not open that file\n";
         }
@@ -707,11 +729,37 @@ std::string Debugger::execute(Console& console, const std::string& line)
         return where(console) + "\n";
     }
 
+    if (command == "disc") {
+        const std::string path = filename();
+        if (path.empty()) {
+            return "disc needs a filename\n";
+        }
+        if (!console.bus.cdrom.disc.load(path)) {
+            return "could not read that disc\n";
+        }
+        const Disc& disc = console.bus.cdrom.disc;
+        return std::format(
+            "{} tracks, {} sectors\n", disc.tracks.size(), disc.sector_count());
+    }
+
+    if (command == "exe") {
+        const std::string path = filename();
+        if (path.empty()) {
+            return "exe needs a filename\n";
+        }
+        const std::string failure = sideload_exe(console, path);
+        if (!failure.empty()) {
+            return failure + "\n";
+        }
+        return where(console) + "\n";
+    }
+
     if (command == "screen") {
-        if (words.size() < 2) {
+        const std::string path = filename();
+        if (path.empty()) {
             return "screen needs a filename\n";
         }
-        return write_screen(console.bus.gpu, words[1]);
+        return write_screen(console.bus.gpu, path);
     }
 
     if (command == "tty") {

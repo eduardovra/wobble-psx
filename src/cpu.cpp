@@ -671,6 +671,17 @@ void Cpu::execute_special(u32 instr)
     case 0x21:  // ADDU
         set_reg(rd(instr), reg(rs(instr)) + reg(rt(instr)));
         break;
+    case 0x22: {  // SUB (traps on signed overflow)
+        const s32 a = static_cast<s32>(reg(rs(instr)));
+        const s32 b = static_cast<s32>(reg(rt(instr)));
+        s32 result = 0;
+        if (__builtin_sub_overflow(a, b, &result)) {
+            raise_exception(Exception::Overflow);
+            break;
+        }
+        set_reg(rd(instr), static_cast<u32>(result));
+        break;
+    }
     case 0x23:  // SUBU
         set_reg(rd(instr), reg(rs(instr)) - reg(rt(instr)));
         break;

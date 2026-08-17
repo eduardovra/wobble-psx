@@ -3,6 +3,7 @@
 #include <algorithm>
 
 #include "savestate.h"
+#include "scheduler.h"
 
 namespace {
 
@@ -39,10 +40,31 @@ constexpr u8 ERROR_INVALID_COMMAND = 0x40;
 constexpr u8 ERROR_NO_DISC = 0x40;
 
 // Interrupt numbers. INT3 acknowledges a command, INT2 reports that
-// what it started has finished, and INT5 is a refusal.
+// what it started has finished, INT5 is a refusal, and INT1 is the one
+// nothing asked for: a sector has arrived.
+constexpr u8 INT_SECTOR_READY = 1;
 constexpr u8 INT_COMPLETE = 2;
 constexpr u8 INT_ACKNOWLEDGE = 3;
 constexpr u8 INT_ERROR = 5;
+
+// Bits of the mode register, set by Setmode.
+constexpr u8 MODE_WHOLE_SECTOR = 1 << 5;
+constexpr u8 MODE_DOUBLE_SPEED = 1 << 7;
+
+// A sector from the header on, which is what the mode bit above asks
+// for when it wants more than the payload.
+constexpr u32 WHOLE_SECTOR_SIZE = 2340;
+
+// The drive turns at 75 sectors a second, or twice that. Everything
+// else about its timing is firmware getting round to things; this part
+// is a motor, and it is the part games time themselves against.
+constexpr u64 SECTORS_PER_SECOND = 75;
+constexpr u64 SINGLE_SPEED_CYCLES = CPU_CLOCK_HZ / SECTORS_PER_SECOND;
+
+// How long the head takes to get somewhere. Real seek time depends on
+// how far it has to go; this is the average, which is what software
+// that waits for the INT2 rather than timing it will see.
+constexpr u64 SEEK_CYCLES = SINGLE_SPEED_CYCLES * 20;
 
 // Bits 0..4 of the interrupt flag register are the ones software can
 // see and acknowledge; the rest read back as ones.
@@ -59,7 +81,12 @@ constexpr u8 FLAG_RESET_PARAMETERS = 0x40;
 constexpr u8 STATUS_PARAMETERS_EMPTY = 1 << 3;
 constexpr u8 STATUS_PARAMETERS_READY = 1 << 4;
 constexpr u8 STATUS_RESPONSE_READY = 1 << 5;
+constexpr u8 STATUS_DATA_READY = 1 << 6;
 constexpr u8 STATUS_BUSY = 1 << 7;
+
+// Writing this bit to the request register copies the sector the drive
+// is holding into the data FIFO; clearing it throws the FIFO away.
+constexpr u8 REQUEST_WANT_DATA = 1 << 7;
 
 // How long the drive takes to answer, in CPU cycles. Nearly every
 // command acknowledges after about the same interval — a millisecond
@@ -75,6 +102,13 @@ constexpr u64 SECOND_ANSWER_CYCLES = 0x4A00;
 // back: 19 September 1994, revision C0, as fitted to an SCPH-1001.
 constexpr u8 TEST_VERSION = 0x20;
 constexpr std::array<u8, 4> CONTROLLER_VERSION = {0x94, 0x09, 0x19, 0xC0};
+
+// What GetID says about a disc it is willing to boot. The type byte
+// marks it as a licensed data disc, and the four characters name the
+// region the BIOS will compare against its own — an SCPH-1001 is a
+// North American console, so a disc it accepts says SCEA.
+constexpr u8 DISC_TYPE_LICENSED = 0x20;
+constexpr std::array<u8, 4> REGION = {'S', 'C', 'E', 'A'};
 
 }  // namespace
 
@@ -93,6 +127,13 @@ void CdRom::reset()
     busy = false;
     queue = {};
     queued = 0;
+    seek_lba = 0;
+    read_lba = 0;
+    reading = false;
+    sector_remaining = 0;
+    sector = {};
+    data_cursor = 0;
+    data_end = 0;
 }
 
 void CdRom::visit_state(State& state)
@@ -110,6 +151,45 @@ void CdRom::visit_state(State& state)
     state(busy);
     state(queue);
     state(queued);
+    state(seek_lba);
+    state(read_lba);
+    state(reading);
+    state(sector_remaining);
+    state(sector);
+    state(data_cursor);
+    state(data_end);
+}
+
+u64 CdRom::cycles_per_sector() const
+{
+    if ((mode & MODE_DOUBLE_SPEED) != 0) {
+        return SINGLE_SPEED_CYCLES / 2;
+    }
+    return SINGLE_SPEED_CYCLES;
+}
+
+u32 CdRom::data_start() const
+{
+    if ((mode & MODE_WHOLE_SECTOR) != 0) {
+        return Disc::HEADER_OFFSET;
+    }
+    return Disc::MODE2_DATA_OFFSET;
+}
+
+u32 CdRom::data_size() const
+{
+    if ((mode & MODE_WHOLE_SECTOR) != 0) {
+        return WHOLE_SECTOR_SIZE;
+    }
+    return Disc::COOKED_SECTOR_SIZE;
+}
+
+u8 CdRom::read_data()
+{
+    if (data_cursor >= data_end) {
+        return 0;
+    }
+    return sector[data_cursor++];
 }
 
 bool CdRom::line_active() const
@@ -146,8 +226,45 @@ void CdRom::deliver()
     queued--;
 }
 
+void CdRom::advance_read(u64 cycles)
+{
+    if (!reading) {
+        return;
+    }
+    if (sector_remaining > cycles) {
+        sector_remaining -= cycles;
+        return;
+    }
+
+    // The queue is two deep, and a read that has got ahead of software
+    // must not overwrite the sector it has not collected yet. So the
+    // drive waits with the sector under its head rather than dropping
+    // it: a game that falls behind is served late, not served wrong.
+    if (queued >= QUEUE_CAPACITY) {
+        sector_remaining = 0;
+        return;
+    }
+
+    if (!disc.read_sector(read_lba, sector)) {
+        // Off the end of the disc. The drive stops rather than
+        // spinning against nothing.
+        reading = false;
+        status = static_cast<u8>(status & ~STATUS_READING);
+        answer(INT_ERROR,
+               {static_cast<u8>(status | STATUS_ERROR), ERROR_SEEK_FAILED},
+               0);
+        return;
+    }
+
+    read_lba++;
+    sector_remaining = cycles_per_sector();
+    answer(INT_SECTOR_READY, {status}, 0);
+}
+
 bool CdRom::tick(u64 cycles)
 {
+    advance_read(cycles);
+
     if (queued == 0) {
         return false;
     }
@@ -176,10 +293,21 @@ void CdRom::execute(u8 command)
 
     switch (command) {
     case GET_STAT:
-    case SET_LOC:
     case MUTE:
     case DEMUTE:
     case SET_FILTER:
+        answer(INT_ACKNOWLEDGE, {status}, ACKNOWLEDGE_CYCLES);
+        break;
+
+    case SET_LOC:
+        // Aims the head without moving it: the seek or read that comes
+        // next is what acts on this. The address is in minutes,
+        // seconds and frames, BCD, counted from the start of the
+        // lead-in rather than of the data.
+        if (parameter_count >= 3) {
+            seek_lba =
+                lba_from_msf({parameters[0], parameters[1], parameters[2]});
+        }
         answer(INT_ACKNOWLEDGE, {status}, ACKNOWLEDGE_CYCLES);
         break;
 
@@ -192,39 +320,148 @@ void CdRom::execute(u8 command)
         answer(INT_ACKNOWLEDGE, {status, mode, 0, 0, 0}, ACKNOWLEDGE_CYCLES);
         break;
 
-    case GET_LOC_P:
-        // Where the drive is on the disc: track one, the very start.
-        answer(INT_ACKNOWLEDGE, {1, 1, 0, 0, 0, 0, 0, 0}, ACKNOWLEDGE_CYCLES);
+    case GET_LOC_P: {
+        // Where the drive is on the disc. Reported from the sector
+        // last read rather than from anything the mechanism knows,
+        // which is also all a real drive has to go on.
+        const Disc::Msf absolute = msf_from_lba(read_lba);
+        const Disc::Track* track = disc.track_at(read_lba);
+        const u32 track_number = track != nullptr ? track->number : 1;
+        const u32 start = track != nullptr ? track->start_lba : 0;
+        const Disc::Msf relative = msf_from_lba(read_lba - start);
+        answer(INT_ACKNOWLEDGE,
+               {to_bcd(static_cast<u8>(track_number)),
+                1,
+                relative.minute,
+                relative.second,
+                relative.frame,
+                absolute.minute,
+                absolute.second,
+                absolute.frame},
+               ACKNOWLEDGE_CYCLES);
+        break;
+    }
+
+    case GET_LOC_L:
+        // The header and subheader of the sector last read, straight
+        // out of it — the twelve bytes of sync are skipped, and the
+        // eight after them are what this answers with.
+        if (!has_disc()) {
+            answer(INT_ERROR, {failed, ERROR_SEEK_FAILED}, ACKNOWLEDGE_CYCLES);
+            break;
+        }
+        answer(INT_ACKNOWLEDGE,
+               {sector[Disc::HEADER_OFFSET],
+                sector[Disc::HEADER_OFFSET + 1],
+                sector[Disc::HEADER_OFFSET + 2],
+                sector[Disc::HEADER_OFFSET + 3],
+                sector[Disc::SUBHEADER_OFFSET],
+                sector[Disc::SUBHEADER_OFFSET + 1],
+                sector[Disc::SUBHEADER_OFFSET + 2],
+                sector[Disc::SUBHEADER_OFFSET + 3]},
+               ACKNOWLEDGE_CYCLES);
         break;
 
     case INIT:
         mode = 0;
+        reading = false;
+        status = static_cast<u8>((status & ~STATUS_READING) | STATUS_MOTOR);
         answer(INT_ACKNOWLEDGE, {status}, ACKNOWLEDGE_CYCLES);
         answer(INT_COMPLETE, {status}, INIT_CYCLES);
         break;
 
     case STOP:
     case PAUSE:
+        // Both stop a read; Stop also parks the mechanism. The first
+        // answer reports what the drive was doing, the second what it
+        // is doing now, which is why the status byte is read twice.
         answer(INT_ACKNOWLEDGE, {status}, ACKNOWLEDGE_CYCLES);
+        reading = false;
+        status = static_cast<u8>(status & ~STATUS_READING);
+        if (command == STOP) {
+            status = static_cast<u8>(status & ~STATUS_MOTOR);
+        }
         answer(INT_COMPLETE, {status}, SECOND_ANSWER_CYCLES);
         break;
 
     case READ_N:
     case READ_S:
-    case SEEK_L:
-    case SEEK_P:
-    case READ_TOC:
-        // Heard, then refused: there is nothing under the head to seek
-        // to or read from.
+        if (!has_disc()) {
+            answer(INT_ACKNOWLEDGE, {status}, ACKNOWLEDGE_CYCLES);
+            answer(
+                INT_ERROR, {failed, ERROR_SEEK_FAILED}, SECOND_ANSWER_CYCLES);
+            break;
+        }
+        // A read acknowledges once and then keeps answering: the
+        // sectors arrive as INT1s from the tick, not from here.
+        read_lba = seek_lba;
+        reading = true;
+        sector_remaining = SEEK_CYCLES + cycles_per_sector();
+        status = static_cast<u8>(status | STATUS_READING);
         answer(INT_ACKNOWLEDGE, {status}, ACKNOWLEDGE_CYCLES);
-        answer(INT_ERROR, {failed, ERROR_SEEK_FAILED}, SECOND_ANSWER_CYCLES);
         break;
 
-    case GET_LOC_L:
-    case GET_TN:
-    case GET_TD:
-        answer(INT_ERROR, {failed, ERROR_SEEK_FAILED}, ACKNOWLEDGE_CYCLES);
+    case SEEK_L:
+    case SEEK_P:
+        if (!has_disc() || seek_lba >= disc.sector_count()) {
+            answer(INT_ACKNOWLEDGE, {status}, ACKNOWLEDGE_CYCLES);
+            answer(
+                INT_ERROR, {failed, ERROR_SEEK_FAILED}, SECOND_ANSWER_CYCLES);
+            break;
+        }
+        reading = false;
+        read_lba = seek_lba;
+        status = static_cast<u8>(status & ~STATUS_READING);
+        answer(INT_ACKNOWLEDGE, {status}, ACKNOWLEDGE_CYCLES);
+        answer(INT_COMPLETE, {status}, SEEK_CYCLES);
         break;
+
+    case READ_TOC:
+        if (!has_disc()) {
+            answer(INT_ACKNOWLEDGE, {status}, ACKNOWLEDGE_CYCLES);
+            answer(
+                INT_ERROR, {failed, ERROR_SEEK_FAILED}, SECOND_ANSWER_CYCLES);
+            break;
+        }
+        // The table of contents is already known from the cue; the
+        // command exists to make the drive go and read it, which takes
+        // time and changes nothing here.
+        answer(INT_ACKNOWLEDGE, {status}, ACKNOWLEDGE_CYCLES);
+        answer(INT_COMPLETE, {status}, INIT_CYCLES);
+        break;
+
+    case GET_TN:
+        if (!has_disc()) {
+            answer(INT_ERROR, {failed, ERROR_SEEK_FAILED}, ACKNOWLEDGE_CYCLES);
+            break;
+        }
+        answer(INT_ACKNOWLEDGE,
+               {status,
+                to_bcd(static_cast<u8>(disc.tracks.front().number)),
+                to_bcd(static_cast<u8>(disc.tracks.back().number))},
+               ACKNOWLEDGE_CYCLES);
+        break;
+
+    case GET_TD: {
+        if (!has_disc()) {
+            answer(INT_ERROR, {failed, ERROR_SEEK_FAILED}, ACKNOWLEDGE_CYCLES);
+            break;
+        }
+        // Track zero is not a track but the lead-out, which is how
+        // software asks how long the disc is.
+        const u8 wanted = parameter_count > 0 ? from_bcd(parameters[0]) : 0;
+        u32 start = disc.sector_count();
+        for (const Disc::Track& track : disc.tracks) {
+            if (track.number == wanted) {
+                start = track.start_lba;
+            }
+        }
+        const Disc::Msf msf = msf_from_lba(start);
+        answer(INT_ACKNOWLEDGE,
+               {status, msf.minute, msf.second},
+               ACKNOWLEDGE_CYCLES);
+        break;
+    }
 
     case TEST:
         if (parameter_count > 0 && parameters[0] == TEST_VERSION) {
@@ -243,17 +480,33 @@ void CdRom::execute(u8 command)
     case GET_ID:
         // The answer the whole boot turns on. An empty drive reports
         // the identification error in its status byte and "no disc" as
-        // the reason, and the BIOS stops looking for a game.
+        // the reason, and the BIOS stops looking for a game; a disc
+        // answers with its type and the region it was pressed for,
+        // which the BIOS compares against its own before running
+        // anything off it.
         answer(INT_ACKNOWLEDGE, {status}, ACKNOWLEDGE_CYCLES);
-        answer(INT_ERROR,
-               {static_cast<u8>(status | STATUS_ID_ERROR),
-                ERROR_NO_DISC,
+        if (!has_disc()) {
+            answer(INT_ERROR,
+                   {static_cast<u8>(status | STATUS_ID_ERROR),
+                    ERROR_NO_DISC,
+                    0,
+                    0,
+                    0,
+                    0,
+                    0,
+                    0},
+                   SECOND_ANSWER_CYCLES);
+            break;
+        }
+        answer(INT_COMPLETE,
+               {status,
                 0,
+                DISC_TYPE_LICENSED,
                 0,
-                0,
-                0,
-                0,
-                0},
+                REGION[0],
+                REGION[1],
+                REGION[2],
+                REGION[3]},
                SECOND_ANSWER_CYCLES);
         break;
 
@@ -279,6 +532,9 @@ u8 CdRom::read_register(u32 phys)
         if (response_read < response_length) {
             value |= STATUS_RESPONSE_READY;
         }
+        if (data_cursor < data_end) {
+            value |= STATUS_DATA_READY;
+        }
         if (busy) {
             value |= STATUS_BUSY;
         }
@@ -295,7 +551,7 @@ u8 CdRom::read_register(u32 phys)
         return response[response_read++];
 
     case 2:
-        return 0;  // the data FIFO, which only a disc could fill
+        return read_data();
 
     case 3:
         // Bits the register does not have read back as ones, and the
@@ -335,7 +591,20 @@ void CdRom::write_register(u32 phys, u8 value)
         return;
 
     case 3:
-        if (index == 1) {
+        if (index == 0) {
+            // The request register. Asking for data presents the
+            // sector the drive is holding; withdrawing the request
+            // throws away whatever of it was left. Software that reads
+            // a sector twice without asking again gets nothing, which
+            // is what makes the request the thing that paces a read.
+            if ((value & REQUEST_WANT_DATA) != 0) {
+                data_cursor = data_start();
+                data_end = data_start() + data_size();
+            } else {
+                data_cursor = 0;
+                data_end = 0;
+            }
+        } else if (index == 1) {
             // Acknowledging is writing a one to the bit, which is the
             // opposite of I_STAT next door. Doing so releases whatever
             // answer the drive has been holding back.
@@ -344,8 +613,7 @@ void CdRom::write_register(u32 phys, u8 value)
                 parameter_count = 0;
             }
         }
-        // Index 0 is the request register, which asks for sector data,
-        // and 2 and 3 are more of the audio path.
+        // Indices 2 and 3 are more of the audio path.
         return;
 
     default:

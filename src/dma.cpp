@@ -225,6 +225,19 @@ u32 read_from_device(Bus& bus, u32 channel, u32 address, u32 remaining)
         return (address - 4) & RAM_ADDRESS_MASK;
     case Dma::Port::Gpu:
         return bus.gpu.read();
+    case Dma::Port::Spu:
+        return bus.spu.read_dma();
+    case Dma::Port::CdRom: {
+        // The same FIFO the CPU would read a byte at a time, taken
+        // four bytes to the word, least significant first. The drive
+        // is what limits how much is there: a channel asked for more
+        // than the sector holds reads zeroes off the end of it.
+        u32 word = 0;
+        for (u32 i = 0; i < 4; i++) {
+            word |= u32{bus.cdrom.read_data()} << (i * 8);
+        }
+        return word;
+    }
     default:
         return 0;
     }
@@ -232,18 +245,26 @@ u32 read_from_device(Bus& bus, u32 channel, u32 address, u32 remaining)
 
 void write_to_device(Bus& bus, u32 channel, u32 word)
 {
-    if (static_cast<Dma::Port>(channel) == Dma::Port::Gpu) {
+    switch (static_cast<Dma::Port>(channel)) {
+    case Dma::Port::Gpu:
         bus.gpu.write_gp0(word);
+        break;
+    case Dma::Port::Spu:
+        bus.spu.write_dma(word);
+        break;
+    default:
+        // The rest do not exist yet, so their words go nowhere. The
+        // transfer still completes, which keeps software from waiting
+        // on a channel that would never finish.
+        break;
     }
-    // Other devices do not exist yet, so their words go nowhere. The
-    // transfer still completes, which keeps software from waiting on a
-    // channel that would never finish.
 }
 
 void report_unserved(Bus& bus, u32 channel)
 {
     const auto port = static_cast<Dma::Port>(channel);
-    if (port == Dma::Port::Gpu || port == Dma::Port::Otc) {
+    if (port == Dma::Port::Gpu || port == Dma::Port::Otc ||
+        port == Dma::Port::CdRom || port == Dma::Port::Spu) {
         return;
     }
     if (bus.note_unhandled(Dma::BASE + channel)) {

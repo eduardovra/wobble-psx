@@ -4,9 +4,60 @@ A PlayStation 1 emulator, named after the console's famously wobbly
 vertex graphics.
 
 It boots the retail BIOS to its shell — the main menu, with the memory
-card and CD player entries, drawn and responding to the controller. No
-disc can be put in the drive yet, which is the state the BIOS reads as
-"no game", and why the shell is as far as it goes.
+card and CD player entries, drawn and responding to the controller —
+and it reads discs. A game image in the drive is found, identified and
+booted: the BIOS reads `SYSTEM.CNF` off the disc, loads the executable
+it names, and runs it.
+
+```sh
+./build-rel/wobble SCPH1001.BIN "Ridge Racer (USA).zip"
+```
+
+The zip a game is distributed in can be given as it is — there is no
+need to unpack it first, or to know which of the files inside is the
+one to open. A `.cue` or `.bin` already sitting on disk works just as
+well, with `--disc` if the extension is one the BIOS image also uses.
+
+The disc is unpacked into the system's temporary directory, and only
+the part the drive can actually read: the cue, and the one image it
+names first. A game with music on it leaves its audio tracks in the
+archive, since nothing here can play them yet — which for Ridge Racer
+is 3.6 MB unpacked instead of 446 MB.
+
+Nothing ever deletes that copy, which is the reason for putting it
+where every system already empties by itself. So a game is unpacked
+once and then read straight from disk until the next reboot, and no
+policy here has to decide what of the user's to throw away. Deleting
+it by hand costs only the unpacking; `TMPDIR` puts it somewhere else.
+
+```
+Ridge Racer     3.6 MB    0.02 s to unpack
+Crash Bandicoot  603 MB    2.8 s to unpack
+```
+
+Crash is the awkward case and cannot be helped: its disc is a single
+Mode 2 track, so the whole of it is the part that gets read.
+
+BIN/CUE is the format underneath, since that is what a PlayStation disc
+actually is — 2352-byte sectors with their own sync and header, and any
+Redbook audio in tracks of its own. A bare `.iso` of 2048-byte blocks
+is accepted too and has its missing sync and headers synthesised.
+
+Games boot, run their startup and draw. None is playable yet. The SPU
+is present but silent — its registers, its half megabyte of sample
+memory and the handshakes software waits on are all there, so a game
+gets past initialising its sound and on to drawing, but nothing is
+decoded and nothing is heard. The MDEC that decodes full-motion video
+is missing entirely.
+
+A program can also be handed to the machine directly, with no disc
+involved. `--exe` boots the BIOS and then puts a PS-EXE where the
+disc's program would have gone, which is how homebrew and the test
+suites written for emulator development are run.
+
+```sh
+./build-rel/wobble SCPH1001.BIN --exe program.exe
+```
 
 ## Controls
 
@@ -18,8 +69,8 @@ card slot.
 
 ## Building
 
-Requires CMake ≥ 3.24 and a C++20 compiler. SDL3 and Dear ImGui are
-fetched and built automatically by CMake (nothing is installed to the
+Requires CMake ≥ 3.24 and a C++20 compiler. SDL3, Dear ImGui and miniz
+are fetched and built automatically by CMake (nothing is installed to the
 system). On Debian/Ubuntu the X11/Wayland dev headers SDL needs come
 from `build-essential libx11-dev libxext-dev libwayland-dev
 libxkbcommon-dev libgl1-mesa-dev`.
@@ -58,8 +109,19 @@ written against the emulator.
 the machine, `break` and `watch` stop it, `regs`/`mem`/`disas`/`dev`
 look at it, `pad` holds a controller button down, `trace` shows the last
 instructions retired, `profile` reports where the time and the memory
-accesses went, `screen` writes what the display is showing as a PPM, and
-`save`/`load` take snapshots. Numbers are hex unless prefixed with `#`.
+accesses went, `screen` writes what the display is showing as a PPM,
+`exe` loads a PS-EXE, and `save`/`load` take snapshots. Numbers are hex
+unless prefixed with `#`.
+
+`exe` is what makes the test suites written for emulator development
+usable, since those ship as PS-EXEs and report their results as text
+the BIOS prints — so a run is a diff against the log the same program
+produced on real hardware:
+
+```sh
+./build-rel/wobble-dbg SCPH1001.BIN -c "exe cpu/cop/cop.exe" \
+    -c "run #8000000" -c "tty" | diff - cpu/cop/psx.log
+```
 
 So the shell can be driven without a window, which is how the controller
 is tested:
@@ -184,7 +246,9 @@ arrives too early is as wrong as one that never comes, since a driver
 that clears an interrupt after asking for it will throw away one
 delivered inside its own store.
 
-Validating the interpreter against a real test ROM is tracked in
+None of that says the machine agrees with the real one, which is what
+the hardware test programs are for. `exe` now runs them; making them
+pass is tracked in
 [issue #1](https://github.com/eduardovra/wobble-psx/issues/1).
 
 ## Formatting and linting

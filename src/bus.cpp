@@ -44,6 +44,12 @@ constexpr u32 EXPANSION1_END = 0x1F080000;
 // Sits in KSEG2 and so is matched on the virtual address, unmasked.
 constexpr u32 CACHE_CONTROL = 0xFFFE0130;
 
+bool in_scratchpad(u32 phys)
+{
+    return phys >= Bus::SCRATCHPAD_START &&
+        phys < Bus::SCRATCHPAD_START + Bus::SCRATCHPAD_SIZE;
+}
+
 bool in_expansion1(u32 phys)
 {
     return phys >= EXPANSION1_START && phys < EXPANSION1_END;
@@ -105,15 +111,17 @@ void Bus::visit_state(State& state)
     // reason in reverse — it is the emulator's own bookkeeping, not
     // anything the console has.
     state(ram);
+    state(scratchpad);
     irq.visit_state(state);
     gpu.visit_state(state);
     dma.visit_state(state);
     cdrom.visit_state(state);
     sio.visit_state(state);
+    spu.visit_state(state);
     timers.visit_state(state);
 }
 
-bool Bus::read_io(u32 phys, u32& value)
+bool Bus::read_io(u32 phys, u32& value, u32 width)
 {
     switch (phys) {
     case Irq::STATUS:
@@ -151,10 +159,17 @@ bool Bus::read_io(u32 phys, u32& value)
         value = timers.read_register(phys, scheduler.now, gpu, irq);
         return true;
     }
+    if (phys >= Spu::BASE && phys < Spu::END) {
+        value = spu.read_register(phys);
+        if (width == 4) {
+            value |= u32{spu.read_register(phys + 2)} << 16;
+        }
+        return true;
+    }
     return false;
 }
 
-bool Bus::write_io(u32 phys, u32 value)
+bool Bus::write_io(u32 phys, u32 value, u32 width)
 {
     switch (phys) {
     case Irq::STATUS:
@@ -207,6 +222,16 @@ bool Bus::write_io(u32 phys, u32 value)
         timers.write_register(phys, value, scheduler.now, gpu, irq);
         return true;
     }
+    if (phys >= Spu::BASE && phys < Spu::END) {
+        spu.write_register(phys, static_cast<u16>(value));
+        if (width == 4) {
+            spu.write_register(phys + 2, static_cast<u16>(value >> 16));
+        }
+        if (spu.interrupt_pending()) {
+            irq.raise(Interrupt::Spu);
+        }
+        return true;
+    }
     return false;
 }
 
@@ -236,12 +261,15 @@ u32 Bus::read32(u32 addr)
     if (phys < RAM_SIZE) {
         return read_from<u32>(ram, phys);
     }
+    if (in_scratchpad(phys)) {
+        return read_from<u32>(scratchpad, phys - SCRATCHPAD_START);
+    }
     if (phys >= BIOS_START && phys < BIOS_START + BIOS_SIZE) {
         return read_from<u32>(bios, phys - BIOS_START);
     }
     if (phys >= IO_START && phys < IO_END) {
         u32 value = 0;
-        read_io(phys, value);  // 0 for a device that does not exist yet
+        read_io(phys, value, 4);  // 0 for a device that does not exist yet
         return value;
     }
     if (note_unhandled(addr)) {
@@ -260,12 +288,15 @@ u16 Bus::read16(u32 addr)
     if (phys < RAM_SIZE) {
         return read_from<u16>(ram, phys);
     }
+    if (in_scratchpad(phys)) {
+        return read_from<u16>(scratchpad, phys - SCRATCHPAD_START);
+    }
     if (phys >= BIOS_START && phys < BIOS_START + BIOS_SIZE) {
         return read_from<u16>(bios, phys - BIOS_START);
     }
     if (phys >= IO_START && phys < IO_END) {
         u32 value = 0;
-        read_io(phys, value);
+        read_io(phys, value, 2);
         return static_cast<u16>(value);
     }
     if (note_unhandled(addr)) {
@@ -284,12 +315,15 @@ u8 Bus::read8(u32 addr)
     if (phys < RAM_SIZE) {
         return ram[phys];
     }
+    if (in_scratchpad(phys)) {
+        return scratchpad[phys - SCRATCHPAD_START];
+    }
     if (phys >= BIOS_START && phys < BIOS_START + BIOS_SIZE) {
         return bios[phys - BIOS_START];
     }
     if (phys >= IO_START && phys < IO_END) {
         u32 value = 0;
-        read_io(phys, value);
+        read_io(phys, value, 1);
         return static_cast<u8>(value);
     }
     if (in_expansion1(phys)) {
@@ -307,6 +341,9 @@ std::optional<u8> Bus::peek8(u32 addr) const
     if (phys < RAM_SIZE) {
         return ram[phys];
     }
+    if (in_scratchpad(phys)) {
+        return scratchpad[phys - SCRATCHPAD_START];
+    }
     if (phys >= BIOS_START && phys < BIOS_START + BIOS_SIZE) {
         return bios[phys - BIOS_START];
     }
@@ -318,6 +355,10 @@ bool Bus::poke8(u32 addr, u8 value)
     const u32 phys = to_physical(addr);
     if (phys < RAM_SIZE) {
         ram[phys] = value;
+        return true;
+    }
+    if (in_scratchpad(phys)) {
+        scratchpad[phys - SCRATCHPAD_START] = value;
         return true;
     }
     return false;
@@ -333,8 +374,12 @@ void Bus::write32(u32 addr, u32 value)
         write_to(ram, phys, value);
         return;
     }
+    if (in_scratchpad(phys)) {
+        write_to(scratchpad, phys - SCRATCHPAD_START, value);
+        return;
+    }
     if (phys >= IO_START && phys < IO_END) {
-        write_io(phys, value);  // dropped if no device claims it yet
+        write_io(phys, value, 4);  // dropped if no device claims it yet
         return;
     }
     if (addr == CACHE_CONTROL) {
@@ -356,8 +401,12 @@ void Bus::write16(u32 addr, u16 value)
         write_to(ram, phys, value);
         return;
     }
+    if (in_scratchpad(phys)) {
+        write_to(scratchpad, phys - SCRATCHPAD_START, value);
+        return;
+    }
     if (phys >= IO_START && phys < IO_END) {
-        write_io(phys, value);
+        write_io(phys, value, 2);
         return;
     }
     if (note_unhandled(addr)) {
@@ -376,8 +425,12 @@ void Bus::write8(u32 addr, u8 value)
         ram[phys] = value;
         return;
     }
+    if (in_scratchpad(phys)) {
+        scratchpad[phys - SCRATCHPAD_START] = value;
+        return;
+    }
     if (phys >= IO_START && phys < IO_END) {
-        write_io(phys, value);
+        write_io(phys, value, 1);
         return;
     }
     if (note_unhandled(addr)) {

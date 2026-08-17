@@ -148,6 +148,11 @@ constexpr u32 add(u32 rd, u32 rs, u32 rt)
     return r_type(rs, rt, rd, 0, 0x20);
 }
 
+constexpr u32 sub(u32 rd, u32 rs, u32 rt)
+{
+    return r_type(rs, rt, rd, 0, 0x22);
+}
+
 // Named with a suffix to stay clear of the POSIX syscall().
 constexpr u32 syscall_op() { return r_type(0, 0, 0, 0, 0x0C); }
 

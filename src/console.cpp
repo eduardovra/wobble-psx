@@ -16,6 +16,7 @@ void Console::reset()
     bus.dma.reset();
     bus.cdrom.reset();
     bus.sio.reset();
+    bus.spu.reset();
     bus.timers.reset();
     scheduler.reset();
     frames = 0;

@@ -3,6 +3,7 @@
 // just a Bus (memory and devices) with a Cpu attached to it.
 
 #include <algorithm>
+#include <string>
 #include <vector>
 
 #include <SDL3/SDL.h>
@@ -12,6 +13,7 @@
 
 #include "console.h"
 #include "disasm.h"
+#include "exe.h"
 #include "gpu.h"
 #include "sio.h"
 
@@ -286,15 +288,52 @@ void log_new_tty_lines(const Cpu& cpu, size_t& logged_upto)
 
 int main(int argc, char** argv)
 {
-    const char* bios_path = (argc > 1) ? argv[1] : "SCPH1001.BIN";
+    std::string bios_path = "SCPH1001.BIN";
+    std::string exe_path;
+    std::string disc_path;
+
+    for (int i = 1; i < argc; i++) {
+        const std::string argument = argv[i];
+        if (argument == "--exe" && i + 1 < argc) {
+            exe_path = argv[++i];
+        } else if (argument == "--disc" && i + 1 < argc) {
+            disc_path = argv[++i];
+        } else if (argument.ends_with(".zip") || argument.ends_with(".cue")) {
+            // A game named without the flag, since that is what
+            // anyone would try first. Only the two extensions a disc
+            // is unambiguously named with are taken this way: a .bin
+            // is as likely to be the BIOS as a disc, so that one still
+            // has to say which it is.
+            disc_path = argument;
+        } else {
+            bios_path = argument;
+        }
+    }
 
     // Megabytes of arrays, too big for the stack.
     static Console console;
     if (!console.bus.load_bios(bios_path)) {
-        SDL_Log("failed to load BIOS from %s", bios_path);
+        SDL_Log("failed to load BIOS from %s", bios_path.c_str());
+        return 1;
+    }
+    // Before the reset, so the drive has the disc in it from the
+    // moment the BIOS first asks what is there.
+    if (!disc_path.empty() && !console.bus.cdrom.disc.load(disc_path)) {
+        SDL_Log("failed to load the disc from %s", disc_path.c_str());
         return 1;
     }
     console.reset();
+
+    // Before the window, since the boot it runs first shows nothing
+    // and a window that appeared only to sit blank would be worse
+    // than one that appears when there is something in it.
+    if (!exe_path.empty()) {
+        const std::string failure = sideload_exe(console, exe_path);
+        if (!failure.empty()) {
+            SDL_Log("%s", failure.c_str());
+            return 1;
+        }
+    }
 
     if (!SDL_Init(SDL_INIT_VIDEO | SDL_INIT_GAMEPAD)) {
         SDL_Log("SDL_Init failed: %s", SDL_GetError());
