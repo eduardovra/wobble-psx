@@ -97,7 +97,17 @@ TEST_CASE("the drawing registers are what GPUSTAT reports back")
     CHECK((gpu.status() & 0x7FF) == 0x7FF);
     CHECK((gpu.status() & (1u << 15)) == 0);
 
+    // That bit needs GP1(09h)'s permission first, and is dropped as it
+    // is written without it rather than ignored afterwards.
     gpu.write_gp0(gp0(0xE1) | (1u << 11));
+    CHECK((gpu.status() & (1u << 15)) == 0);
+
+    gpu.write_gp1((0x09u << 24) | 1);
+    gpu.write_gp0(gp0(0xE1) | (1u << 11));
+    CHECK((gpu.status() & (1u << 15)) != 0);
+
+    // Permission withdrawn does not take back a bit already stored.
+    gpu.write_gp1(0x09u << 24);
     CHECK((gpu.status() & (1u << 15)) != 0);
 
     // GP0(E6h)'s two mask bits land at 11 and 12.

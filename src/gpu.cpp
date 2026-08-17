@@ -11,6 +11,16 @@ namespace {
 constexpr u32 POLYLINE_END = 0x50005000;
 constexpr u32 POLYLINE_END_MASK = 0xF000F000;
 
+// The parts of GP0(E1h) a textured primitive carries with it: where its
+// texture lives, and whether it has one at all.
+constexpr u32 DRAW_MODE_TEXTURE_PAGE = 0x1FF;
+constexpr u32 DRAW_MODE_TEXTURE_DISABLE = 1u << 11;
+
+// GP0(E6h)'s two bits, and the pixel bit they are about.
+constexpr u32 MASK_SET_WHEN_DRAWING = 1u << 0;
+constexpr u32 MASK_CHECK_BEFORE_DRAW = 1u << 1;
+constexpr u16 MASK_BIT = 0x8000;
+
 // A transfer's width and height are encoded so that zero means the
 // maximum: 0 pixels would be a pointless transfer, 1024 (or 512) does
 // not fit the field, so the value wraps into it.
@@ -164,6 +174,7 @@ void Gpu::visit_state(State& state)
     state(draw_offset);
     state(mask_setting);
     state(display_mode);
+    state(allow_texture_disable);
     state(display_start);
     state(display_range_x);
     state(display_range_y);
@@ -191,6 +202,7 @@ void Gpu::reset()
     draw_offset = 0;
     mask_setting = 0;
     display_mode = 0;
+    allow_texture_disable = false;
     display_start = 0;
     display_range_x = 0;
     display_range_y = 0;
@@ -220,6 +232,30 @@ bool Gpu::next_scanline()
         }
     }
     return false;
+}
+
+// The draw mode as it is allowed to be stored. Texture disable is the
+// one bit software cannot simply have: it needs GP1(09h) first, and
+// without it the bit never arrives rather than being ignored later.
+u32 Gpu::gated_draw_mode(u32 value) const
+{
+    if (allow_texture_disable) {
+        return value;
+    }
+    return value & ~DRAW_MODE_TEXTURE_DISABLE;
+}
+
+// A textured primitive carries its own texture page, and that is not a
+// separate register from GP0(E1h) — it is the same one. Drawing leaves
+// the page behind, where GPUSTAT and the next untextured primitive both
+// find it. Only the page and the disable bit come across; the dither
+// and draw-to-display bits beside them are the draw mode's own.
+void Gpu::apply_texpage(u32 attribute)
+{
+    constexpr u32 FROM_PRIMITIVE =
+        DRAW_MODE_TEXTURE_PAGE | DRAW_MODE_TEXTURE_DISABLE;
+    draw_mode &= ~FROM_PRIMITIVE;
+    draw_mode |= gated_draw_mode(attribute) & FROM_PRIMITIVE;
 }
 
 u32 Gpu::status() const
@@ -351,7 +387,7 @@ void Gpu::execute_gp0()
         irq = true;
         return;
     case 0xE1:
-        draw_mode = command[0];
+        draw_mode = gated_draw_mode(command[0]);
         return;
     case 0xE2:
         texture_window = command[0];
@@ -452,7 +488,8 @@ void Gpu::draw_polygon()
                 how.clut = texture >> 16;
             }
             if (i == 1) {
-                how.texpage = (texture >> 16) & 0x1FF;
+                apply_texpage(texture >> 16);
+                how.texpage = draw_mode & DRAW_MODE_TEXTURE_PAGE;
             }
             word++;
         }
@@ -529,8 +566,22 @@ void Gpu::store_pixel(u16 pixel)
         (transfer.x + transfer.pixels_done % transfer.width) % VRAM_WIDTH;
     const u32 y =
         (transfer.y + transfer.pixels_done / transfer.width) % VRAM_HEIGHT;
-    vram[std::size_t{y} * VRAM_WIDTH + x] = pixel;
+    const std::size_t at = std::size_t{y} * VRAM_WIDTH + x;
+
+    // GP0(E6h) governs a transfer as much as it governs drawing: the
+    // mask bit is not a property of the pixels being sent but of the
+    // port they arrive through. A pixel already marked is protected
+    // from one, and one written through it is marked in turn.
     transfer.pixels_done++;
+    const bool protect = (mask_setting & MASK_CHECK_BEFORE_DRAW) != 0;
+    if (protect && (vram[at] & MASK_BIT) != 0) {
+        return;
+    }
+    if ((mask_setting & MASK_SET_WHEN_DRAWING) != 0) {
+        vram[at] = pixel | MASK_BIT;
+        return;
+    }
+    vram[at] = pixel;
 }
 
 u16 Gpu::load_pixel()
@@ -580,6 +631,9 @@ void Gpu::write_gp1(u32 word)
         break;
     case 0x08:
         display_mode = parameter;
+        break;
+    case 0x09:
+        allow_texture_disable = (parameter & 1) != 0;
         break;
     case 0x10:
         // Reads back a drawing register through GPUREAD. The register

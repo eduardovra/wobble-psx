@@ -73,6 +73,11 @@ struct Gpu {
 
     u32 status() const;
 
+    // GP0(E1h) as it may be stored, and the part of it a textured
+    // primitive brings with it.
+    u32 gated_draw_mode(u32 value) const;
+    void apply_texpage(u32 attribute);
+
     // The clipping rectangle GP0(E3h) and GP0(E4h) set, and the shift
     // GP0(E5h) applies to every vertex. All three are kept as the words
     // software wrote, so this is where they are taken apart. The two
@@ -161,6 +166,12 @@ struct Gpu {
     u32 draw_offset = 0;       // GP0(E5h)
     u32 mask_setting = 0;      // GP0(E6h), two bits
     u32 display_mode = 0;      // GP1(08h)
+
+    // GP1(09h). Whether the draw mode's texture-disable bit is allowed
+    // to mean anything: with this off, the bit is dropped as it is
+    // written rather than ignored as it is used, so turning this off
+    // later leaves a bit already taken in place.
+    bool allow_texture_disable = false;
 
     u32 display_start = 0;    // GP1(05h)
     u32 display_range_x = 0;  // GP1(06h)
