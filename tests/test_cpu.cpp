@@ -20,7 +20,7 @@ TEST_CASE("a load's value is not visible to the next instruction")
     CHECK(m.reg(t3) == 0xDEADBEEF);
 }
 
-TEST_CASE("consecutive loads into one register each land in turn")
+TEST_CASE("a second load into one register cancels the first")
 {
     Machine m;
     m.bus->write32(Machine::DATA, 0x11111111);
@@ -29,12 +29,12 @@ TEST_CASE("consecutive loads into one register each land in turn")
         addiu(t1, zero, Machine::DATA),
         lw(t0, t1, 0),
         lw(t0, t1, 4),
-        addu(t2, t0, zero),  // sees the first load
-        addu(t3, t0, zero),  // and only then the second
+        addu(t2, t0, zero),  // the first load is never visible here
+        addu(t3, t0, zero),  // and the second arrives only now
     });
     m.run(5);
 
-    CHECK(m.reg(t2) == 0x11111111);
+    CHECK(m.reg(t2) == 0);
     CHECK(m.reg(t3) == 0x22222222);
 }
 

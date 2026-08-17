@@ -99,6 +99,12 @@ void Cpu::visit_state(State& state)
     state(sr);
     state(epc);
     state(cause);
+    state(jump_dest);
+    state(bpc);
+    state(bda);
+    state(dcic);
+    state(bdam);
+    state(bpcm);
     state(in_delay_slot);
     state(branching);
     state(load_reg);
@@ -162,6 +168,10 @@ u32 Cpu::step()
     // The load issued by the previous instruction lands now; the
     // current instruction's own write (below) overrides it. It
     // completes even if this step faults — the load already happened.
+    // What it displaced is kept, because a second load to the same
+    // register puts it back — see below.
+    const u32 landing_reg = load_reg;
+    const u32 displaced = pending_reg(landing_reg);
     set_reg(load_reg, load_value);
     load_reg = 0;
     load_value = 0;
@@ -191,6 +201,23 @@ u32 Cpu::step()
         next_pc += 4;
 
         execute(instr);
+
+        // A load whose delay slot holds another load to the same
+        // register never reaches it. The register is taken over before
+        // anything can read what the first load brought, so the value
+        // that landed above is put back to what it displaced — the
+        // second load will deliver its own a step later. LWL/LWR are
+        // no exception: they read the landed value while executing and
+        // have already folded it into what they scheduled.
+        if (load_reg != 0 && load_reg == landing_reg) {
+            set_reg(landing_reg, displaced);
+        }
+
+        // Recorded after the fact rather than at each of the branches,
+        // which all say where they are going the same way.
+        if (branching) {
+            jump_dest = next_pc;
+        }
     }
 
     // Writes made by this instruction become readable from here on.
@@ -594,6 +621,9 @@ void Cpu::execute_special(u32 instr)
     case 0x0C:  // SYSCALL
         raise_exception(Exception::Syscall);
         break;
+    case 0x0D:  // BREAK
+        raise_exception(Exception::Breakpoint);
+        break;
     // Multiply and divide write the hi/lo pair rather than a general
     // register — a 32x32 product needs 64 bits, and division yields a
     // quotient and a remainder. MFHI/MFLO move the halves back out.
@@ -727,8 +757,26 @@ void Cpu::execute_cop0(u32 instr)
     switch (rs(instr)) {
     case 0x00:  // MFC0 (value arrives via the load delay slot)
         switch (rd(instr)) {
+        case 3:
+            schedule_load(rt(instr), bpc);
+            break;
+        case 5:
+            schedule_load(rt(instr), bda);
+            break;
+        case 6:
+            schedule_load(rt(instr), jump_dest);
+            break;
+        case 7:
+            schedule_load(rt(instr), dcic);
+            break;
         case 8:
             schedule_load(rt(instr), bad_vaddr);
+            break;
+        case 9:
+            schedule_load(rt(instr), bdam);
+            break;
+        case 11:
+            schedule_load(rt(instr), bpcm);
             break;
         case 12:
             schedule_load(rt(instr), sr);
@@ -739,6 +787,9 @@ void Cpu::execute_cop0(u32 instr)
         case 14:
             schedule_load(rt(instr), epc);
             break;
+        case 15:
+            schedule_load(rt(instr), PROCESSOR_ID);
+            break;
         default:
             halt(std::format("MFC0 cop0_r{} at {:08X}", rd(instr), current_pc));
             break;
@@ -746,6 +797,21 @@ void Cpu::execute_cop0(u32 instr)
         break;
     case 0x04:  // MTC0
         switch (rd(instr)) {
+        case 3:
+            bpc = reg(rt(instr));
+            break;
+        case 5:
+            bda = reg(rt(instr));
+            break;
+        case 7:
+            dcic = reg(rt(instr));
+            break;
+        case 9:
+            bdam = reg(rt(instr));
+            break;
+        case 11:
+            bpcm = reg(rt(instr));
+            break;
         case 12:
             sr = reg(rt(instr));
             break;
@@ -760,8 +826,11 @@ void Cpu::execute_cop0(u32 instr)
             cause |= value & CAUSE_SOFTWARE_INTERRUPTS;
             break;
         }
+        case 6:
+        case 15:
+            break;  // read-only; the write is dropped, not refused
         default:
-            // breakpoint registers etc. — the BIOS zeroes them
+            // registers this CPU does not have — the BIOS zeroes them
             if (reg(rt(instr)) != 0) {
                 halt(std::format(
                     "MTC0 cop0_r{} at {:08X}", rd(instr), current_pc));

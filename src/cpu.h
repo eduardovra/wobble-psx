@@ -77,6 +77,25 @@ struct Cpu {
     // cause_register(), which is what software reads.
     u32 cause = 0;
 
+    // COP0 r6: where the last taken branch or jump was going. The CPU
+    // writes it, software only reads it — an exception handler asks
+    // what a delay slot it faulted in was about to do.
+    u32 jump_dest = 0;
+
+    // COP0 r3, r5, r7, r9, r11: the hardware breakpoint registers.
+    // Nothing here watches them, so no emulated breakpoint ever fires,
+    // but software writes them and reads them back and is entitled to
+    // find what it left.
+    u32 bpc = 0;   // break on executing this address
+    u32 bda = 0;   // break on touching this data address
+    u32 dcic = 0;  // which of the two are armed, and what fired
+    u32 bdam = 0;  // which bits of the data address must match
+    u32 bpcm = 0;  // which bits of the execute address must match
+
+    // COP0 r15: which CPU this is. Read-only and the same number on
+    // every console, so it is a constant rather than state.
+    static constexpr u32 PROCESSOR_ID = 0x00000002;
+
     // Coprocessor 2, the geometry engine. It is part of the CPU in the
     // same sense COP0 is: reached only through this instruction set,
     // and holding no state the rest of the machine can see.
@@ -121,7 +140,8 @@ struct Cpu {
         AddressLoad = 0x4,   // unaligned or unmapped load address
         AddressStore = 0x5,  // same, for stores
         Syscall = 0x8,
-        Overflow = 0xC,  // signed overflow in ADD/ADDI
+        Breakpoint = 0x9,  // the BREAK instruction, not a COP0 watch
+        Overflow = 0xC,    // signed overflow in ADD/ADDI
     };
 
 private:
