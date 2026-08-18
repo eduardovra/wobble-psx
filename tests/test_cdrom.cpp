@@ -1,3 +1,4 @@
+#include <algorithm>
 #include <filesystem>
 #include <fstream>
 #include <memory>
@@ -88,10 +89,14 @@ struct Drive {
 // A disc for the cases that need the drive to find something. Every
 // byte of a sector is that sector's own number, so an answer taken
 // from the medium says which sector it came off.
+//
+// Sectors named in `audio` are written as a movie's sound instead:
+// the larger of the two sector forms, marked as compressed audio
+// arriving in real time, which is what a drive tells them apart by.
 struct Image {
     std::filesystem::path directory;
 
-    explicit Image(u32 sectors)
+    explicit Image(u32 sectors, const std::vector<u32>& audio = {})
     {
         directory = std::filesystem::temp_directory_path() /
             ("wobble-cdrom-" + std::to_string(counter++));
@@ -100,11 +105,25 @@ struct Image {
         path = (directory / "disc.bin").string();
         std::ofstream file(path, std::ios::binary);
         for (u32 lba = 0; lba < sectors; lba++) {
-            const std::vector<char> raw(Disc::RAW_SECTOR_SIZE,
-                                        static_cast<char>(lba));
+            std::vector<char> raw(Disc::RAW_SECTOR_SIZE,
+                                  static_cast<char>(lba));
+
+            const bool sound =
+                std::find(audio.begin(), audio.end(), lba) != audio.end();
+            raw[Disc::SUBHEADER_OFFSET] = FILE_NUMBER;
+            raw[Disc::SUBHEADER_OFFSET + 1] = CHANNEL;
+            raw[Disc::SUBHEADER_OFFSET + 2] =
+                sound ? SUBMODE_SOUND : SUBMODE_DATA;
+            raw[Disc::SUBHEADER_OFFSET + 3] = 0;
+
             file.write(raw.data(), static_cast<std::streamsize>(raw.size()));
         }
     }
+
+    static constexpr char FILE_NUMBER = 1;
+    static constexpr char CHANNEL = 2;
+    static constexpr char SUBMODE_DATA = 0x08;
+    static constexpr char SUBMODE_SOUND = 0x64;
 
     ~Image() { std::filesystem::remove_all(directory); }
 
@@ -125,6 +144,10 @@ constexpr u64 LONG_ENOUGH = 0x40000;
 // The same again for the one thing that is mechanical rather than
 // firmware getting round to something: moving the head.
 constexpr u64 SEEK_LONG = 0x1000000;
+
+// Less than a sector takes, for the cases that must see them arrive
+// one at a time: a drive left to run reads ahead into the next.
+constexpr u64 UNDER_A_SECTOR = 0x40000;
 
 }  // namespace
 
@@ -295,7 +318,7 @@ TEST_CASE("the drive has no header to report until it has read one")
     drive.command(0x10);
     drive.advance(LONG_ENOUGH);
     CHECK(drive.pending() == 3);
-    CHECK(drive.answer() == std::vector<u8>(8, 16));
+    CHECK(drive.answer() == std::vector<u8>{16, 16, 16, 16, 1, 2, 0x08, 0});
 }
 
 TEST_CASE("a read says it is seeking until its first sector arrives")
@@ -362,4 +385,44 @@ TEST_CASE("the head reaches past the end of the data but not past the disc")
     drive.command(0x11);  // GetlocP
     drive.advance(LONG_ENOUGH);
     CHECK(drive.pending() == 5);
+}
+
+TEST_CASE("a movie's sound never reaches the software reading its picture")
+{
+    // Sound written between the pictures, as a movie on a disc is.
+    const Image image(64, {9, 11});
+    const Drive drive;
+    REQUIRE(drive.console->bus.cdrom.disc.load(image.path));
+
+    // Reading for the picture, with the drive told to play the sound
+    // as it goes. That makes the sound sectors its own business, and
+    // software is never offered them.
+    drive.command(0x0E, {0x40});  // Setmode, XA-ADPCM
+    drive.advance(LONG_ENOUGH);
+    drive.acknowledge();
+
+    drive.command(0x02, {0x00, 0x02, 0x08});  // Setloc, sector 8
+    drive.advance(LONG_ENOUGH);
+    drive.acknowledge();
+
+    drive.command(0x1B);  // ReadS
+    drive.advance(LONG_ENOUGH);
+    drive.acknowledge();
+
+    // Time is let past in less than a sector at a time so the drive
+    // never gets a sector ahead of the one being collected.
+    std::vector<u8> delivered;
+    for (u32 wanted = 0; wanted < 3; wanted++) {
+        for (u32 tries = 0; tries < 128 && drive.pending() != 1; tries++) {
+            drive.advance(UNDER_A_SECTOR);
+        }
+        REQUIRE(drive.pending() == 1);
+
+        drive.set_index(0);
+        drive.write(3, 0x80);
+        delivered.push_back(drive.read(2));
+        drive.acknowledge();
+    }
+
+    CHECK(delivered == std::vector<u8>{8, 10, 12});
 }

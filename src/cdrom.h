@@ -104,6 +104,14 @@ struct CdRom {
     // The last Setmode, kept because Getparam reads it back.
     u8 mode = 0;
 
+    // Which of the interleaved streams on the disc the drive is
+    // listening to, set by Setfilter. A movie is written as one run of
+    // sectors carrying several files and channels at once — picture in
+    // one, sound in another — and the filter is what picks the sound
+    // out of it.
+    u8 filter_file = 0;
+    u8 filter_channel = 0;
+
     std::array<u8, FIFO_CAPACITY> parameters{};
     u32 parameter_count = 0;
 
@@ -161,6 +169,14 @@ struct CdRom {
     // Whether the drive has a disc that reads. Everything that would
     // touch the medium refuses when it does not.
     bool has_disc() const { return disc.loaded(); }
+
+    // Whether a sector is one the sound hardware takes rather than
+    // software: compressed audio, on the stream the filter names.
+    // Software never sees these, which is the whole point of them —
+    // a game reads a movie's picture and the sound arrives beside it
+    // without anything having to ask for it.
+    bool
+    is_audio_sector(const std::array<u8, Disc::RAW_SECTOR_SIZE>& raw) const;
 
     // How long one sector takes at the speed the mode register asks
     // for. The drive turns at a constant 75 sectors a second, or twice

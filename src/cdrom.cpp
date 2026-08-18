@@ -58,8 +58,18 @@ constexpr u8 INT_ACKNOWLEDGE = 3;
 constexpr u8 INT_ERROR = 5;
 
 // Bits of the mode register, set by Setmode.
+constexpr u8 MODE_XA_FILTER = 1 << 3;
 constexpr u8 MODE_WHOLE_SECTOR = 1 << 5;
+constexpr u8 MODE_XA_ADPCM = 1 << 6;
 constexpr u8 MODE_DOUBLE_SPEED = 1 << 7;
+
+// Bits of a sector's submode, the third byte of its subheader. A
+// movie's sound is all three at once: compressed audio, written in the
+// larger of the two sector forms because it needs the room and can
+// afford to lose a byte, and marked as arriving in real time.
+constexpr u8 SUBMODE_AUDIO = 1 << 2;
+constexpr u8 SUBMODE_FORM_2 = 1 << 5;
+constexpr u8 SUBMODE_REALTIME = 1 << 6;
 
 // A sector from the header on, which is what the mode bit above asks
 // for when it wants more than the payload.
@@ -152,6 +162,8 @@ void CdRom::reset()
     busy = false;
     queue = {};
     queued = 0;
+    filter_file = 0;
+    filter_channel = 0;
     seek_lba = 0;
     read_lba = 0;
     reading = false;
@@ -168,6 +180,8 @@ void CdRom::visit_state(State& state)
     state(index);
     state(status);
     state(mode);
+    state(filter_file);
+    state(filter_channel);
     state(parameters);
     state(parameter_count);
     state(response);
@@ -274,7 +288,12 @@ void CdRom::advance_read(u64 cycles)
         return;
     }
 
-    if (!disc.read_sector(read_lba, sector)) {
+    // Read somewhere of its own first. A sector meant for the sound
+    // hardware never reaches the buffer software takes its data from,
+    // and one arriving mid-transfer must not disturb what is being
+    // taken out of it.
+    std::array<u8, Disc::RAW_SECTOR_SIZE> incoming{};
+    if (!disc.read_sector(read_lba, incoming)) {
         // Off the end of the disc. The drive stops rather than
         // spinning against nothing, and forgets where it was: there
         // was no header where it ended up to tell it.
@@ -292,7 +311,53 @@ void CdRom::advance_read(u64 cycles)
 
     read_lba++;
     sector_remaining = cycles_per_sector();
+
+    // A movie's sound is written between its pictures, in the same run
+    // of sectors, and goes straight to the sound hardware: no
+    // interrupt, and nothing for software to collect. A game reading
+    // the picture would be handed the sound as though it were more
+    // picture otherwise, which is what makes a movie fail to decode
+    // rather than merely fail to play.
+    if (is_audio_sector(incoming)) {
+        return;
+    }
+
+    sector = incoming;
     answer(INT_SECTOR_READY, {status}, 0);
+}
+
+bool CdRom::is_audio_sector(
+    const std::array<u8, Disc::RAW_SECTOR_SIZE>& raw) const
+{
+    if ((mode & MODE_XA_ADPCM) == 0) {
+        // Without the mode bit there is no sound path at all, and
+        // every sector is data whatever it says about itself.
+        return false;
+    }
+
+    const u8 submode = raw[Disc::SUBHEADER_OFFSET + 2];
+    const u8 wanted = SUBMODE_AUDIO | SUBMODE_REALTIME | SUBMODE_FORM_2;
+    if ((submode & wanted) != wanted) {
+        return false;
+    }
+
+    // With the filter on, sound on any other stream is not this
+    // movie's and is dropped rather than played — which still keeps it
+    // away from software either way.
+    if ((mode & MODE_XA_FILTER) != 0) {
+        const u8 file = raw[Disc::SUBHEADER_OFFSET];
+        const u8 channel = raw[Disc::SUBHEADER_OFFSET + 1];
+        if (file != filter_file || channel != filter_channel) {
+            return true;
+        }
+    }
+
+    // Nothing plays it yet: the decoder for this compression and the
+    // mixer that would fold it in beside the voices are both still
+    // missing, and are noted where they would have gone in the sound
+    // processor. What matters here is that it is the sound hardware's
+    // sector and not software's.
+    return true;
 }
 
 void CdRom::load_header()
@@ -365,7 +430,17 @@ void CdRom::execute(u8 command)
     case GET_STAT:
     case MUTE:
     case DEMUTE:
+        answer(INT_ACKNOWLEDGE, {status}, ACKNOWLEDGE_CYCLES);
+        break;
+
     case SET_FILTER:
+        // Which of the streams woven into one run of sectors the
+        // sound is on. It only matters once the mode register asks
+        // for the sound to be played at all.
+        if (parameter_count >= 2) {
+            filter_file = parameters[0];
+            filter_channel = parameters[1];
+        }
         answer(INT_ACKNOWLEDGE, {status}, ACKNOWLEDGE_CYCLES);
         break;
 
