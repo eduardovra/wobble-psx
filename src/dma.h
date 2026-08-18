@@ -72,7 +72,10 @@ struct Dma {
         // Whether the channel has been told to go. Manual transfers
         // need an explicit trigger as well as being enabled; the
         // others start as soon as they are enabled.
-        bool started() const;
+        // Whether the channel is set up to run. `device_asking` is
+        // whether the thing behind it wants the bus, which is what
+        // starts a Manual transfer that software has not triggered.
+        bool started(bool device_asking) const;
 
         // Clears the bits that started it, which is how software sees
         // that the transfer is over.

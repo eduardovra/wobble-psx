@@ -259,3 +259,74 @@ TEST_CASE("the controller registers read back what was written")
     // Each channel has its own set, three registers apart.
     CHECK(bus->read32(madr(OTC_CHANNEL)) == 0);
 }
+
+TEST_CASE("the ordering table channel ignores everything it is told")
+{
+    const LooseBus bus;
+    bus->write32(DPCR, ALL_CHANNELS_ENABLED);
+
+    // Channel 6 is built to walk backwards through RAM writing a
+    // chain, and has no settings. Software asking for the opposite of
+    // each of them in turn gets the same table either way.
+    const u32 contrary = START | TO_DEVICE | SYNC_LINKED_LIST;
+    bus->write32(madr(OTC_CHANNEL), SCRATCH);
+    bus->write32(bcr(OTC_CHANNEL), 4);
+    bus->write32(chcr(OTC_CHANNEL), contrary);
+
+    CHECK(bus->read32(SCRATCH) == SCRATCH - 4);
+    CHECK(bus->read32(SCRATCH - 4) == SCRATCH - 8);
+    CHECK(bus->read32(SCRATCH - 12) == 0xFFFFFF);
+
+    // And the register does not remember being asked: the bits that
+    // are not wired to anything read back as the channel was built,
+    // which is backwards and nothing else.
+    CHECK(bus->read32(chcr(OTC_CHANNEL)) == DECREASING);
+}
+
+TEST_CASE("a chain with no end leaves the channel running")
+{
+    const LooseBus bus;
+    bus->write32(DPCR, ALL_CHANNELS_ENABLED);
+    bus->write32(DICR, (1u << 23) | (1u << (16 + GPU_CHANNEL)));
+
+    // A packet with no payload whose next pointer is itself. The
+    // console follows it for ever, transferring nothing, while the
+    // CPU carries on beside it.
+    write_ram(*bus, SCRATCH, SCRATCH);
+
+    bus->write32(madr(GPU_CHANNEL), SCRATCH);
+    bus->write32(chcr(GPU_CHANNEL), START | TO_DEVICE | SYNC_LINKED_LIST);
+
+    // So as far as software can see it never finished: the enable bit
+    // is still up, and no interrupt was raised to say otherwise.
+    CHECK((bus->read32(chcr(GPU_CHANNEL)) & (1u << 24)) != 0);
+    CHECK((bus->read32(DICR) & (1u << (24 + GPU_CHANNEL))) == 0);
+}
+
+TEST_CASE("a device asking for the bus starts a transfer software did not")
+{
+    const LooseBus bus;
+    bus->write32(DPCR, ALL_CHANNELS_ENABLED);
+
+    write_ram(*bus, SCRATCH + 0, 0xA0000000);
+    write_ram(*bus, SCRATCH + 4, 0);
+    write_ram(*bus, SCRATCH + 8, (1u << 16) | 2);
+    write_ram(*bus, SCRATCH + 12, 0xBBBBAAAA);
+
+    // Enabled, in the sync mode that waits for a trigger, but never
+    // triggered. The GPU is asking for the bus, and that is the other
+    // thing that starts one.
+    bus->write32(madr(GPU_CHANNEL), SCRATCH);
+    bus->write32(bcr(GPU_CHANNEL), 4);
+    bus->write32(chcr(GPU_CHANNEL), (1u << 24) | TO_DEVICE);
+
+    CHECK(bus->gpu.vram[0] == 0xAAAA);
+    CHECK(bus->gpu.vram[1] == 0xBBBB);
+
+    // The ordering table's channel has no device behind it to ask, so
+    // there it really is the trigger that starts one.
+    bus->write32(madr(OTC_CHANNEL), SCRATCH);
+    bus->write32(bcr(OTC_CHANNEL), 4);
+    bus->write32(chcr(OTC_CHANNEL), 1u << 24);
+    CHECK(bus->read32(SCRATCH) == 0xA0000000);
+}

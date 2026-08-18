@@ -40,9 +40,30 @@ constexpr u32 RAM_ADDRESS_MASK = 0x1FFFFC;
 // is actually tested.
 constexpr u32 LIST_END = 0x800000;
 
+// Channel 6 does one thing and has no settings. Its control register
+// is mostly not a register at all: the bits that would say which way
+// the transfer goes, which way the address moves and how it is paced
+// are not wired to anything, and read back as they were built rather
+// than as they were written. All that is left is the enable, the
+// trigger, and one spare bit that remembers what it is told.
+constexpr u32 OTC_CHANNEL = 6;
+constexpr u32 OTC_WRITABLE = CHCR_ENABLE | CHCR_TRIGGER | (1u << 30);
+
 // The size field of a linked-list node header: how many words of
 // payload follow it.
 constexpr u32 LIST_HEADER_WORDS_SHIFT = 24;
+
+// How many nodes a list may have before it is not a list. A node is
+// four bytes at least, and they live in the two megabytes of RAM, so a
+// walk that visits more nodes than that many has been somewhere twice
+// and is going round. Software does write such a chain — by accident,
+// or to hold the channel open — and the console just keeps following
+// it, transferring nothing and never finishing, while the CPU carries
+// on beside it. That cannot be done here, where a transfer runs inside
+// the store that started it, so the walk stops instead and leaves the
+// channel where the console leaves it: still busy, and with no
+// interrupt to say it is done.
+constexpr u32 LIST_NODE_LIMIT = 0x200000 / 4;
 
 }  // namespace
 
@@ -69,14 +90,17 @@ u32 Dma::Channel::transfer_words() const
     return size == 0 ? 0x10000 : size;
 }
 
-bool Dma::Channel::started() const
+bool Dma::Channel::started(bool device_asking) const
 {
     if ((control & CHCR_ENABLE) == 0) {
         return false;
     }
-    // Only a Manual transfer waits for its trigger; the others are
-    // paced by the device and go as soon as they are enabled.
-    if (sync_mode() == SyncMode::Manual) {
+    // A Manual transfer goes when software triggers it by hand, or
+    // when the device behind the channel asks for the bus on its own
+    // — the trigger is how software starts one that nothing is
+    // asking for. The other sync modes are paced by the device
+    // throughout and go as soon as they are enabled.
+    if (sync_mode() == SyncMode::Manual && !device_asking) {
         return (control & CHCR_TRIGGER) != 0;
     }
     return true;
@@ -98,6 +122,7 @@ void Dma::visit_state(State& state)
 void Dma::reset()
 {
     channels = {};
+    channels[OTC_CHANNEL].control = CHCR_DECREASING;
     control = 0x07654321;
     interrupt = 0;
 }
@@ -122,7 +147,10 @@ bool Dma::channel_ready(u32 channel) const
     if ((control & enable) == 0) {
         return false;
     }
-    return channels[channel].started();
+    // Every device here answers the moment it is asked, so the only
+    // channel nothing is asking on behalf of is the ordering table's,
+    // which has no device behind it at all.
+    return channels[channel].started(channel != OTC_CHANNEL);
 }
 
 bool Dma::complete(u32 channel)
@@ -176,6 +204,11 @@ u32 Dma::write_register(u32 phys, u32 value)
             break;
         case 0x8:
             channel.control = value;
+            if (index == OTC_CHANNEL) {
+                // Built to walk backwards through a block of RAM, and
+                // nothing software writes changes that.
+                channel.control = (value & OTC_WRITABLE) | CHCR_DECREASING;
+            }
             break;
         default:
             break;
@@ -323,12 +356,15 @@ void run_block(Bus& bus, u32 channel)
 // words for the device. It is how a frame's worth of GPU commands is
 // handed over in one go, assembled in whatever order suits the game
 // and chained into the order the GPU should see.
-void run_linked_list(Bus& bus, u32 channel)
+//
+// Reports whether it reached the end of the chain. A chain with no end
+// is the one case where it does not.
+bool run_linked_list(Bus& bus, u32 channel)
 {
     const Dma::Channel& settings = bus.dma.channels[channel];
     u32 address = settings.base & RAM_ADDRESS_MASK;
 
-    while (true) {
+    for (u32 node = 0; node < LIST_NODE_LIMIT; node++) {
         const u32 header = read_ram(bus, address);
         u32 words = header >> LIST_HEADER_WORDS_SHIFT;
         while (words > 0) {
@@ -337,10 +373,11 @@ void run_linked_list(Bus& bus, u32 channel)
             words--;
         }
         if ((header & LIST_END) != 0) {
-            return;
+            return true;
         }
         address = header & RAM_ADDRESS_MASK;
     }
+    return false;
 }
 
 }  // namespace
@@ -350,7 +387,12 @@ void run_dma(Bus& bus, u32 channel)
     report_unserved(bus, channel);
 
     if (bus.dma.channels[channel].sync_mode() == Dma::SyncMode::LinkedList) {
-        run_linked_list(bus, channel);
+        if (!run_linked_list(bus, channel)) {
+            // Still going, as far as software can see. Nothing clears
+            // the enable bit and nothing raises the interrupt; the
+            // channel is left running until something writes it off.
+            return;
+        }
     } else {
         run_block(bus, channel);
     }
