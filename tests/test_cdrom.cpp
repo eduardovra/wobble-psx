@@ -169,6 +169,42 @@ TEST_CASE("parameters reach the command that was written after them")
     CHECK(drive.answer() == std::vector<u8>{0x02, 0x80, 0x00, 0x00, 0x00});
 }
 
+TEST_CASE("asking for a sector already in hand does not rewind it")
+{
+    const Drive drive;
+    CdRom& cdrom = drive.console->bus.cdrom;
+
+    // A sector whose every byte says where in the sector it came from,
+    // so a FIFO that restarted is told apart from one that carried on.
+    for (u32 i = 0; i < cdrom.sector.size(); i++) {
+        cdrom.sector[i] = static_cast<u8>(i);
+    }
+
+    drive.command(0x0E, {0x20});  // Setmode, whole sectors
+    drive.advance(LONG_ENOUGH);
+    drive.acknowledge();
+
+    // A game reads the twelve bytes of header and subheader first, and
+    // asks again before taking the data behind them. The second ask
+    // must leave the first where it finished.
+    drive.set_index(0);
+    drive.write(3, 0x80);
+    for (u8 offset = 12; offset < 24; offset++) {
+        CHECK(drive.read(2) == offset);
+    }
+
+    drive.write(3, 0x80);
+    CHECK(drive.read(2) == 24);
+    CHECK(drive.read(2) == 25);
+
+    // Withdrawing the request does throw the rest away, and asking
+    // afresh then presents the sector from its start.
+    drive.write(3, 0x00);
+    CHECK(drive.read(2) == 0);
+    drive.write(3, 0x80);
+    CHECK(drive.read(2) == 12);
+}
+
 TEST_CASE("the status register tracks both FIFOs")
 {
     const Drive drive;

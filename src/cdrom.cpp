@@ -597,9 +597,18 @@ void CdRom::write_register(u32 phys, u8 value)
             // throws away whatever of it was left. Software that reads
             // a sector twice without asking again gets nothing, which
             // is what makes the request the thing that paces a read.
+            //
+            // Asking again while bytes are still in hand does nothing
+            // at all — the sector is not presented afresh. Games rely
+            // on that: reading a sector's header and its data as two
+            // separate transfers, each preceded by a request, only
+            // works because the second one leaves the first where it
+            // finished.
             if ((value & REQUEST_WANT_DATA) != 0) {
-                data_cursor = data_start();
-                data_end = data_start() + data_size();
+                if (data_cursor >= data_end) {
+                    data_cursor = data_start();
+                    data_end = data_start() + data_size();
+                }
             } else {
                 data_cursor = 0;
                 data_end = 0;
