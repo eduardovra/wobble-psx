@@ -95,6 +95,7 @@ struct CdRom {
     // asked of it went wrong.
     static constexpr u8 STATUS_ERROR = 1 << 0;
     static constexpr u8 STATUS_MOTOR = 1 << 1;
+    static constexpr u8 STATUS_SEEK_ERROR = 1 << 2;
     static constexpr u8 STATUS_ID_ERROR = 1 << 3;
     static constexpr u8 STATUS_READING = 1 << 5;
     static constexpr u8 STATUS_SEEKING = 1 << 6;
@@ -136,6 +137,17 @@ struct CdRom {
     u32 read_lba = 0;
     bool reading = false;
 
+    // A read begins by moving the head, and the status byte says so:
+    // seeking until the first sector arrives, reading from then on.
+    bool seeking = false;
+
+    // Whether the head has passed over a sector since the console was
+    // switched on, which is the only thing that makes the header
+    // Getloc reports mean anything. It survives Init — a drive that
+    // has read once has a header for ever after — and is lost only
+    // when the head ends up somewhere it could not read.
+    bool header_valid = false;
+
     // Cycles left until the next sector passes under the head.
     u64 sector_remaining = 0;
 
@@ -173,6 +185,14 @@ private:
     // because it is the only part of the drive that runs without
     // having been asked to.
     void advance_read(u64 cycles);
+
+    // Reads the header of the sector the head has arrived at, which
+    // is what a seek does last and what Getloc answers from.
+    void load_header();
+
+    // Gives up on where the head is: the state a drive is left in by
+    // a seek that found nothing to read.
+    void lose_position();
 
     // Queues an answer `delay` cycles out. The parameters are read
     // during the command, not when the answer is given, so a command

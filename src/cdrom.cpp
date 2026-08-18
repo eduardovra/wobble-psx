@@ -38,6 +38,16 @@ enum Command : u8 {
 constexpr u8 ERROR_SEEK_FAILED = 0x04;
 constexpr u8 ERROR_INVALID_COMMAND = 0x40;
 constexpr u8 ERROR_NO_DISC = 0x40;
+constexpr u8 ERROR_NOT_READY = 0x80;
+
+// What a sector says about itself when there is no sector: the mode a
+// data disc is written in, and the subheader bit that marks the
+// payload as data rather than as sound.
+constexpr u8 MODE_2 = 2;
+constexpr u8 SUBMODE_DATA = 0x08;
+
+// What Getloc calls the run-out past the last track.
+constexpr u8 LEAD_OUT_TRACK = 0xAA;
 
 // Interrupt numbers. INT3 acknowledges a command, INT2 reports that
 // what it started has finished, INT5 is a refusal, and INT1 is the one
@@ -65,6 +75,15 @@ constexpr u64 SINGLE_SPEED_CYCLES = CPU_CLOCK_HZ / SECTORS_PER_SECOND;
 // how far it has to go; this is the average, which is what software
 // that waits for the INT2 rather than timing it will see.
 constexpr u64 SEEK_CYCLES = SINGLE_SPEED_CYCLES * 20;
+
+// How far it can go. A disc is seventy-four minutes of medium whatever
+// was written on it, and the drive will position itself anywhere on
+// that; only past the edge of it is there nothing to reach. So the
+// limit is the disc rather than the data — cdrom/getloc seeks to
+// 74:00:00 on an image with a fraction of that on it and expects to
+// arrive.
+constexpr u32 SEEK_LIMIT_LBA =
+    74 * 60 * static_cast<u32>(SECTORS_PER_SECOND) - Disc::LEAD_IN_SECTORS;
 
 // Bits 0..4 of the interrupt flag register are the ones software can
 // see and acknowledge; the rest read back as ones.
@@ -98,6 +117,12 @@ constexpr u64 ACKNOWLEDGE_CYCLES = 0xC4E1;
 constexpr u64 INIT_CYCLES = 0x13CCE;
 constexpr u64 SECOND_ANSWER_CYCLES = 0x4A00;
 
+// Bringing a read to a stop is the exception, and a mechanical one:
+// about thirty milliseconds, whichever speed the drive was turning at.
+// cdrom/timing measures it on the console at between 1006472 and
+// 1046336 cycles across ten runs.
+constexpr u64 PAUSE_CYCLES = 0xFA000;
+
 // The version of the controller's own firmware, which Test(20h) reads
 // back: 19 September 1994, revision C0, as fitted to an SCPH-1001.
 constexpr u8 TEST_VERSION = 0x20;
@@ -130,6 +155,8 @@ void CdRom::reset()
     seek_lba = 0;
     read_lba = 0;
     reading = false;
+    seeking = false;
+    header_valid = false;
     sector_remaining = 0;
     sector = {};
     data_cursor = 0;
@@ -154,6 +181,8 @@ void CdRom::visit_state(State& state)
     state(seek_lba);
     state(read_lba);
     state(reading);
+    state(seeking);
+    state(header_valid);
     state(sector_remaining);
     state(sector);
     state(data_cursor);
@@ -247,18 +276,59 @@ void CdRom::advance_read(u64 cycles)
 
     if (!disc.read_sector(read_lba, sector)) {
         // Off the end of the disc. The drive stops rather than
-        // spinning against nothing.
-        reading = false;
-        status = static_cast<u8>(status & ~STATUS_READING);
-        answer(INT_ERROR,
-               {static_cast<u8>(status | STATUS_ERROR), ERROR_SEEK_FAILED},
-               0);
+        // spinning against nothing, and forgets where it was: there
+        // was no header where it ended up to tell it.
+        lose_position();
+        answer(INT_ERROR, {status, ERROR_SEEK_FAILED}, 0);
         return;
     }
+
+    // The first sector is also the end of the seek the read began
+    // with, which is what the status byte has been reporting until
+    // now.
+    seeking = false;
+    header_valid = true;
+    status = static_cast<u8>((status & ~STATUS_SEEKING) | STATUS_READING);
 
     read_lba++;
     sector_remaining = cycles_per_sector();
     answer(INT_SECTOR_READY, {status}, 0);
+}
+
+void CdRom::load_header()
+{
+    // A seek ends with the head over a sector, and reading that
+    // sector's header is how the drive knows it arrived — which is
+    // also what leaves Getloc with something to answer.
+    //
+    // Past the end of what was written the disc is still there and
+    // still turning, with no header anywhere on it. The console's
+    // drive answers from where its own servo says it is rather than
+    // refusing, so that is what stands in here: the address, and the
+    // mode a data disc is written in.
+    if (!disc.read_sector(read_lba, sector)) {
+        const Disc::Msf msf = msf_from_lba(read_lba);
+        sector = {};
+        sector[Disc::HEADER_OFFSET] = msf.minute;
+        sector[Disc::HEADER_OFFSET + 1] = msf.second;
+        sector[Disc::HEADER_OFFSET + 2] = msf.frame;
+        sector[Disc::HEADER_OFFSET + 3] = MODE_2;
+        sector[Disc::SUBHEADER_OFFSET + 2] = SUBMODE_DATA;
+        sector[Disc::SUBHEADER_OFFSET + 6] = SUBMODE_DATA;
+    }
+    header_valid = true;
+}
+
+void CdRom::lose_position()
+{
+    // What a drive that cannot find a header does: it gives up on the
+    // read, stops the motor, and has nothing left to answer Getloc
+    // with. The seek-error bit is how it says so, and it stands in
+    // place of the general error bit rather than beside it.
+    reading = false;
+    seeking = false;
+    header_valid = false;
+    status = STATUS_SEEK_ERROR;
 }
 
 bool CdRom::tick(u64 cycles)
@@ -323,14 +393,25 @@ void CdRom::execute(u8 command)
     case GET_LOC_P: {
         // Where the drive is on the disc. Reported from the sector
         // last read rather than from anything the mechanism knows,
-        // which is also all a real drive has to go on.
+        // which is also all a real drive has to go on — so a head
+        // that ended up somewhere unreadable cannot answer either.
+        if ((status & STATUS_SEEK_ERROR) != 0) {
+            answer(INT_ERROR, {status, ERROR_SEEK_FAILED}, ACKNOWLEDGE_CYCLES);
+            break;
+        }
         const Disc::Msf absolute = msf_from_lba(read_lba);
         const Disc::Track* track = disc.track_at(read_lba);
-        const u32 track_number = track != nullptr ? track->number : 1;
+
+        // Past the last track the head is over the lead-out, which is
+        // numbered rather than named: AA, and not in BCD, because AA
+        // is not a number that BCD can hold.
+        const u8 number = track != nullptr
+            ? to_bcd(static_cast<u8>(track->number))
+            : LEAD_OUT_TRACK;
         const u32 start = track != nullptr ? track->start_lba : 0;
         const Disc::Msf relative = msf_from_lba(read_lba - start);
         answer(INT_ACKNOWLEDGE,
-               {to_bcd(static_cast<u8>(track_number)),
+               {number,
                 1,
                 relative.minute,
                 relative.second,
@@ -346,8 +427,14 @@ void CdRom::execute(u8 command)
         // The header and subheader of the sector last read, straight
         // out of it — the twelve bytes of sync are skipped, and the
         // eight after them are what this answers with.
-        if (!has_disc()) {
-            answer(INT_ERROR, {failed, ERROR_SEEK_FAILED}, ACKNOWLEDGE_CYCLES);
+        //
+        // Which means there has to have been one. A drive that has not
+        // passed over a sector since it was switched on has no header
+        // to give and refuses, and it refuses with its status as it
+        // stands rather than with the error bit added: nothing went
+        // wrong, there is simply nothing there yet.
+        if (!has_disc() || !header_valid) {
+            answer(INT_ERROR, {status, ERROR_NOT_READY}, ACKNOWLEDGE_CYCLES);
             break;
         }
         answer(INT_ACKNOWLEDGE,
@@ -363,9 +450,14 @@ void CdRom::execute(u8 command)
         break;
 
     case INIT:
+        // Everything the drive was doing stops and the motor comes
+        // back on. What survives is the header: a drive that has read
+        // a sector once can answer Getloc for the rest of the time it
+        // is powered, and Init is not a power cycle.
         mode = 0;
         reading = false;
-        status = static_cast<u8>((status & ~STATUS_READING) | STATUS_MOTOR);
+        seeking = false;
+        status = STATUS_MOTOR;
         answer(INT_ACKNOWLEDGE, {status}, ACKNOWLEDGE_CYCLES);
         answer(INT_COMPLETE, {status}, INIT_CYCLES);
         break;
@@ -377,11 +469,12 @@ void CdRom::execute(u8 command)
         // is doing now, which is why the status byte is read twice.
         answer(INT_ACKNOWLEDGE, {status}, ACKNOWLEDGE_CYCLES);
         reading = false;
-        status = static_cast<u8>(status & ~STATUS_READING);
+        seeking = false;
+        status = static_cast<u8>(status & ~(STATUS_READING | STATUS_SEEKING));
         if (command == STOP) {
             status = static_cast<u8>(status & ~STATUS_MOTOR);
         }
-        answer(INT_COMPLETE, {status}, SECOND_ANSWER_CYCLES);
+        answer(INT_COMPLETE, {status}, PAUSE_CYCLES);
         break;
 
     case READ_N:
@@ -394,24 +487,33 @@ void CdRom::execute(u8 command)
         }
         // A read acknowledges once and then keeps answering: the
         // sectors arrive as INT1s from the tick, not from here.
+        //
+        // It begins where the last Setloc pointed, which is somewhere
+        // else, so the head has to get there first. Until it does the
+        // drive reports itself as seeking rather than reading — the
+        // two bits are never both up.
         read_lba = seek_lba;
         reading = true;
+        seeking = true;
+        status = static_cast<u8>((status & ~STATUS_READING) | STATUS_SEEKING);
         sector_remaining = SEEK_CYCLES + cycles_per_sector();
-        status = static_cast<u8>(status | STATUS_READING);
         answer(INT_ACKNOWLEDGE, {status}, ACKNOWLEDGE_CYCLES);
         break;
 
     case SEEK_L:
     case SEEK_P:
-        if (!has_disc() || seek_lba >= disc.sector_count()) {
+        if (!has_disc() || seek_lba > SEEK_LIMIT_LBA) {
             answer(INT_ACKNOWLEDGE, {status}, ACKNOWLEDGE_CYCLES);
+            lose_position();
             answer(
-                INT_ERROR, {failed, ERROR_SEEK_FAILED}, SECOND_ANSWER_CYCLES);
+                INT_ERROR, {status, ERROR_SEEK_FAILED}, SECOND_ANSWER_CYCLES);
             break;
         }
         reading = false;
+        seeking = false;
         read_lba = seek_lba;
-        status = static_cast<u8>(status & ~STATUS_READING);
+        status = static_cast<u8>(status & ~(STATUS_READING | STATUS_SEEKING));
+        load_header();
         answer(INT_ACKNOWLEDGE, {status}, ACKNOWLEDGE_CYCLES);
         answer(INT_COMPLETE, {status}, SEEK_CYCLES);
         break;

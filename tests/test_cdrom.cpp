@@ -1,4 +1,7 @@
+#include <filesystem>
+#include <fstream>
 #include <memory>
+#include <string>
 #include <vector>
 
 #include <doctest/doctest.h>
@@ -82,9 +85,46 @@ struct Drive {
     }
 };
 
+// A disc for the cases that need the drive to find something. Every
+// byte of a sector is that sector's own number, so an answer taken
+// from the medium says which sector it came off.
+struct Image {
+    std::filesystem::path directory;
+
+    explicit Image(u32 sectors)
+    {
+        directory = std::filesystem::temp_directory_path() /
+            ("wobble-cdrom-" + std::to_string(counter++));
+        std::filesystem::create_directories(directory);
+
+        path = (directory / "disc.bin").string();
+        std::ofstream file(path, std::ios::binary);
+        for (u32 lba = 0; lba < sectors; lba++) {
+            const std::vector<char> raw(Disc::RAW_SECTOR_SIZE,
+                                        static_cast<char>(lba));
+            file.write(raw.data(), static_cast<std::streamsize>(raw.size()));
+        }
+    }
+
+    ~Image() { std::filesystem::remove_all(directory); }
+
+    Image(const Image&) = delete;
+    Image& operator=(const Image&) = delete;
+
+    std::string path;
+
+    static int counter;
+};
+
+int Image::counter = 0;
+
 // Comfortably longer than any answer takes, for the cases that care
 // only that one eventually arrived.
 constexpr u64 LONG_ENOUGH = 0x40000;
+
+// The same again for the one thing that is mechanical rather than
+// firmware getting round to something: moving the head.
+constexpr u64 SEEK_LONG = 0x1000000;
 
 }  // namespace
 
@@ -221,4 +261,105 @@ TEST_CASE("the status register tracks both FIFOs")
     drive.advance(LONG_ENOUGH);
     CHECK((drive.read(0) & 0x80) == 0);
     CHECK((drive.read(0) & 0x20) != 0);
+}
+
+TEST_CASE("the drive has no header to report until it has read one")
+{
+    const Image image(64);
+    const Drive drive;
+    REQUIRE(drive.console->bus.cdrom.disc.load(image.path));
+
+    // Nothing has passed under the head since the console was switched
+    // on, so there is no header to answer with — and the refusal does
+    // not claim anything went wrong, because nothing did.
+    drive.command(0x10);  // GetlocL
+    drive.advance(LONG_ENOUGH);
+    CHECK(drive.pending() == 5);
+    CHECK(drive.answer() == std::vector<u8>{0x02, 0x80});
+    drive.acknowledge();
+
+    // A seek ends with the head over a sector, and from then on the
+    // header is that sector's own bytes.
+    drive.command(0x02, {0x00, 0x02, 0x16});  // Setloc, sector 16
+    drive.advance(LONG_ENOUGH);
+    drive.acknowledge();
+
+    drive.command(0x15);  // SeekL
+    drive.advance(LONG_ENOUGH);
+    CHECK(drive.pending() == 3);
+    drive.acknowledge();
+    drive.advance(SEEK_LONG);
+    CHECK(drive.pending() == 2);
+    drive.acknowledge();
+
+    drive.command(0x10);
+    drive.advance(LONG_ENOUGH);
+    CHECK(drive.pending() == 3);
+    CHECK(drive.answer() == std::vector<u8>(8, 16));
+}
+
+TEST_CASE("a read says it is seeking until its first sector arrives")
+{
+    const Image image(64);
+    const Drive drive;
+    REQUIRE(drive.console->bus.cdrom.disc.load(image.path));
+
+    drive.command(0x02, {0x00, 0x02, 0x16});  // Setloc, sector 16
+    drive.advance(LONG_ENOUGH);
+    drive.acknowledge();
+
+    // The read begins somewhere else, so the head has to get there
+    // first, and the two bits are never both up.
+    drive.command(0x06);  // ReadN
+    drive.advance(LONG_ENOUGH);
+    CHECK(drive.pending() == 3);
+    CHECK(drive.answer() == std::vector<u8>{0x02 | 0x40});
+    drive.acknowledge();
+
+    drive.advance(SEEK_LONG);
+    CHECK(drive.pending() == 1);
+    CHECK(drive.answer() == std::vector<u8>{0x02 | 0x20});
+}
+
+TEST_CASE("the head reaches past the end of the data but not past the disc")
+{
+    const Image image(64);
+    const Drive drive;
+    REQUIRE(drive.console->bus.cdrom.disc.load(image.path));
+
+    // Sixty-four sectors of data on seventy-four minutes of medium.
+    // The drive positions itself against the disc, not against what
+    // happens to be written on it, so this arrives.
+    drive.command(0x02, {0x74, 0x00, 0x00});
+    drive.advance(LONG_ENOUGH);
+    drive.acknowledge();
+
+    drive.command(0x15);  // SeekL
+    drive.advance(LONG_ENOUGH);
+    drive.acknowledge();
+    drive.advance(SEEK_LONG);
+    CHECK(drive.pending() == 2);
+    drive.acknowledge();
+
+    // Half a minute further on there is no disc left to reach. The
+    // drive gives up, stops the motor, and reports the seek error in
+    // place of the general one.
+    drive.command(0x02, {0x74, 0x30, 0x00});
+    drive.advance(LONG_ENOUGH);
+    drive.acknowledge();
+
+    drive.command(0x15);
+    drive.advance(LONG_ENOUGH);
+    CHECK(drive.pending() == 3);
+    drive.acknowledge();
+    drive.advance(LONG_ENOUGH);
+    CHECK(drive.pending() == 5);
+    CHECK(drive.answer() == std::vector<u8>{0x04, 0x04});
+    drive.acknowledge();
+
+    // With the head somewhere it could not read, neither Getloc has
+    // anything left to say.
+    drive.command(0x11);  // GetlocP
+    drive.advance(LONG_ENOUGH);
+    CHECK(drive.pending() == 5);
 }
