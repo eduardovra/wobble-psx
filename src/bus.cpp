@@ -38,9 +38,14 @@ constexpr u32 REGION_MASK[8] = {
 
 constexpr u32 BIOS_START = 0x1FC00000;
 constexpr u32 IO_START = 0x1F801000;
-constexpr u32 IO_END = 0x1F803000;
+constexpr u32 IO_END = 0x1F802000;
 constexpr u32 EXPANSION1_START = 0x1F000000;
 constexpr u32 EXPANSION1_END = 0x1F080000;
+// Expansion region 2: the debug port, where a development board's
+// serial lines and the POST register live. Nothing is plugged in
+// here, so the bus floats and every read comes back all ones.
+constexpr u32 EXPANSION2_START = 0x1F802000;
+constexpr u32 EXPANSION2_END = 0x1F803000;
 // Sits in KSEG2 and so is matched on the virtual address, unmasked.
 constexpr u32 CACHE_CONTROL = 0xFFFE0130;
 
@@ -53,6 +58,11 @@ bool in_scratchpad(u32 phys)
 bool in_expansion1(u32 phys)
 {
     return phys >= EXPANSION1_START && phys < EXPANSION1_END;
+}
+
+bool in_expansion2(u32 phys)
+{
+    return phys >= EXPANSION2_START && phys < EXPANSION2_END;
 }
 
 // Shifting an address right by 29 leaves its top 3 bits: the region
@@ -146,10 +156,16 @@ bool Bus::read_io(u32 phys, u32& value, u32 width)
         return true;
     }
     // The CD-ROM controller's four registers are bytes rather than
-    // words, so each address in its range is its own register and the
-    // access width does not come into it.
+    // words: each address in its range is its own register, and the
+    // controller drives that one byte onto every lane of the bus. So a
+    // wider read finds it repeated rather than finding the registers
+    // beside it — a word read of the status register answers 1A1A1A1Ah.
     if (phys >= CdRom::BASE && phys < CdRom::END) {
-        value = cdrom.read_register(phys);
+        const u32 byte = cdrom.read_register(phys) & 0xFF;
+        value = 0;
+        for (u32 lane = 0; lane < width; lane++) {
+            value |= byte << (lane * 8);
+        }
         return true;
     }
     if (phys >= Sio::BASE && phys < Sio::END) {
@@ -181,7 +197,7 @@ bool Bus::write_io(u32 phys, u32 value, u32 width)
         irq.acknowledge(static_cast<u16>(value));
         return true;
     case Irq::MASK:
-        irq.mask = static_cast<u16>(value);
+        irq.mask = static_cast<u16>(value) & Irq::LINES;
         return true;
     case Gpu::GP0:
         gpu.write_gp0(value);
@@ -212,7 +228,11 @@ bool Bus::write_io(u32 phys, u32 value, u32 width)
         return true;
     }
     if (phys >= CdRom::BASE && phys < CdRom::END) {
-        cdrom.write_register(phys, static_cast<u8>(value));
+        // The other side of that byte-wide bus: a wider write reaches
+        // the register one byte at a time, so what stays behind is the
+        // byte the access ends with rather than the one at the bottom.
+        const u32 last_lane = (width - 1) * 8;
+        cdrom.write_register(phys, static_cast<u8>(value >> last_lane));
         return true;
     }
     if (phys >= Sio::BASE && phys < Sio::END) {
@@ -245,6 +265,40 @@ bool Bus::write_io(u32 phys, u32 value, u32 width)
         return true;
     }
     return false;
+}
+
+std::optional<u32> Bus::fetch(u32 addr)
+{
+    if (debug != nullptr) {
+        debug->note_access(addr, 4, false);
+    }
+    // The fetch is not billed. There is an instruction cache on the
+    // R3000A and none here, so code running from RAM — which is nearly
+    // all of it — fetches at one cycle on hardware and would cost seven
+    // if this counted it. Charging nothing is the closer of the two
+    // answers until the cache is modelled; the price is that the BIOS's
+    // own uncached run out of ROM, which nothing times, comes out
+    // faster than it really is.
+    const u32 phys = to_physical(addr);
+    if (phys < RAM_SIZE) {
+        return read_from<u32>(ram, phys);
+    }
+    if (phys >= BIOS_START && phys < BIOS_START + BIOS_SIZE) {
+        return read_from<u32>(bios, phys - BIOS_START);
+    }
+    if (phys >= IO_START && phys < IO_END) {
+        // A hardware register is fetched from as readily as it is read
+        // from, and the instruction that comes back is whatever the
+        // register holds. Software does this on purpose: two words
+        // written into a pair of DMA registers and jumped to are a
+        // function like any other. The gaps between the registers are
+        // not, and fall through to the refusal below.
+        u32 value = 0;
+        if (read_io(phys, value, 4)) {
+            return value;
+        }
+    }
+    return std::nullopt;
 }
 
 bool Bus::note_unhandled(u32 addr)
@@ -284,6 +338,9 @@ u32 Bus::read32(u32 addr)
         read_io(phys, value, 4);  // 0 for a device that does not exist yet
         return value;
     }
+    if (in_expansion2(phys)) {
+        return 0xFFFFFFFF;  // nothing on the port: the lines float high
+    }
     if (note_unhandled(addr)) {
         log_message(std::format("bus: unhandled read32 at {:08X}", addr));
     }
@@ -311,6 +368,9 @@ u16 Bus::read16(u32 addr)
         read_io(phys, value, 2);
         return static_cast<u16>(value);
     }
+    if (in_expansion2(phys)) {
+        return 0xFFFF;  // nothing on the port: the lines float high
+    }
     if (note_unhandled(addr)) {
         log_message(std::format("bus: unhandled read16 at {:08X}", addr));
     }
@@ -337,6 +397,9 @@ u8 Bus::read8(u32 addr)
         u32 value = 0;
         read_io(phys, value, 1);
         return static_cast<u8>(value);
+    }
+    if (in_expansion2(phys)) {
+        return 0xFF;  // nothing on the port: the lines float high
     }
     if (in_expansion1(phys)) {
         return 0xFF;  // no expansion device present
@@ -394,6 +457,9 @@ void Bus::write32(u32 addr, u32 value)
         write_io(phys, value, 4);  // dropped if no device claims it yet
         return;
     }
+    if (in_expansion2(phys)) {
+        return;
+    }
     if (addr == CACHE_CONTROL) {
         return;
     }
@@ -403,50 +469,58 @@ void Bus::write32(u32 addr, u32 value)
     }
 }
 
-void Bus::write16(u32 addr, u16 value)
+void Bus::write16(u32 addr, u32 value)
 {
     if (debug != nullptr) {
         debug->note_access(addr, 2, true);
     }
     const u32 phys = to_physical(addr);
+    const u16 half = static_cast<u16>(value);
     if (phys < RAM_SIZE) {
-        write_to(ram, phys, value);
+        write_to(ram, phys, half);
         return;
     }
     if (in_scratchpad(phys)) {
-        write_to(scratchpad, phys - SCRATCHPAD_START, value);
+        write_to(scratchpad, phys - SCRATCHPAD_START, half);
         return;
     }
     if (phys >= IO_START && phys < IO_END) {
         write_io(phys, value, 2);
         return;
     }
+    if (in_expansion2(phys)) {
+        return;
+    }
     if (note_unhandled(addr)) {
         log_message(std::format(
-            "bus: unhandled write16 at {:08X} = {:04X}", addr, value));
+            "bus: unhandled write16 at {:08X} = {:04X}", addr, half));
     }
 }
 
-void Bus::write8(u32 addr, u8 value)
+void Bus::write8(u32 addr, u32 value)
 {
     if (debug != nullptr) {
         debug->note_access(addr, 1, true);
     }
     const u32 phys = to_physical(addr);
+    const u8 byte = static_cast<u8>(value);
     if (phys < RAM_SIZE) {
-        ram[phys] = value;
+        ram[phys] = byte;
         return;
     }
     if (in_scratchpad(phys)) {
-        scratchpad[phys - SCRATCHPAD_START] = value;
+        scratchpad[phys - SCRATCHPAD_START] = byte;
         return;
     }
     if (phys >= IO_START && phys < IO_END) {
         write_io(phys, value, 1);
         return;
     }
+    if (in_expansion2(phys)) {
+        return;  // the debug port's POST register lands here
+    }
     if (note_unhandled(addr)) {
         log_message(std::format(
-            "bus: unhandled write8 at {:08X} = {:02X}", addr, value));
+            "bus: unhandled write8 at {:08X} = {:02X}", addr, byte));
     }
 }

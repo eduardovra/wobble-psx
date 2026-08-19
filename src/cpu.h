@@ -137,11 +137,13 @@ struct Cpu {
     // reported rather than swallowed by the BIOS handler.
     enum class Exception : u32 {
         Interrupt = 0x0,
-        AddressLoad = 0x4,   // unaligned or unmapped load address
-        AddressStore = 0x5,  // same, for stores
+        AddressLoad = 0x4,    // unaligned or unmapped load address
+        AddressStore = 0x5,   // same, for stores
+        BusErrorFetch = 0x6,  // fetched an instruction from nowhere
         Syscall = 0x8,
-        Breakpoint = 0x9,  // the BREAK instruction, not a COP0 watch
-        Overflow = 0xC,    // signed overflow in ADD/ADDI
+        Breakpoint = 0x9,           // the BREAK instruction, not a COP0 watch
+        CoprocessorUnusable = 0xB,  // one that is absent or switched off
+        Overflow = 0xC,             // signed overflow in ADD/ADDI
     };
 
 private:
@@ -157,6 +159,20 @@ private:
 
     // Same, recording the offending address in BadVaddr first.
     void raise_address_error(Exception code, u32 addr);
+
+    // Same, recording which coprocessor was asked for in Cause's CE
+    // field, which is the only thing that says which one it was.
+    void raise_coprocessor_unusable(u32 number);
+
+    // Whether SR's enable bit for a coprocessor is set. This is the
+    // whole test for the coprocessor loads and stores, LWCz/SWCz.
+    bool coprocessor_enabled(u32 number) const;
+
+    // Whether a COPz instruction may reach its coprocessor at all.
+    // Same test, except that COP0 answers the kernel whether or not
+    // its bit is set: there the bit decides only whether user-mode
+    // code may, which is why the BIOS never has to set it.
+    bool coprocessor_usable(u32 number) const;
 
     // Whether an unmasked interrupt is waiting with interrupts on.
     bool interrupt_pending() const;

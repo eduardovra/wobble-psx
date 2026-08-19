@@ -1,6 +1,7 @@
 #include "cpu.h"
 
 #include <format>
+#include <optional>
 #include <utility>
 
 #include "savestate.h"
@@ -25,14 +26,26 @@ constexpr u32 CYCLES_PER_INSTRUCTION = 1;
 // scratchpad instead of memory; the BIOS does this while it clears the
 // cache at boot.
 constexpr u32 SR_INTERRUPT_ENABLE = 1 << 0;  // IEc, the current level
+constexpr u32 SR_USER_MODE = 1 << 1;         // KUc, the current level
 constexpr u32 SR_ISOLATE_CACHE = 1 << 16;
 constexpr u32 SR_BOOT_VECTORS = 1 << 22;  // BEV: vectors in ROM
+
+// SR bits 28..31, one per coprocessor slot: whether software may use
+// that coprocessor. Only COP2, the geometry engine, is behind one that
+// matters — COP1 and COP3 are empty slots either way — but all four
+// bits exist and all four are checked.
+constexpr u32 SR_COPROCESSOR_ENABLE = 1 << 28;
 
 // Shifted to build the byte masks the unaligned loads and stores use.
 constexpr u32 ALL_ONES = 0xFFFFFFFF;
 
 constexpr u32 CAUSE_EXC_CODE = 0x7C;  // bits 6..2
 constexpr u32 CAUSE_BRANCH_DELAY = 1u << 31;
+
+// Cause bits 29..28, the CE field: which coprocessor a Coprocessor
+// Unusable exception was about. Nothing else fills it in.
+constexpr u32 CAUSE_COPROCESSOR = 0x30000000;
+constexpr u32 CAUSE_COPROCESSOR_SHIFT = 28;
 
 // SR and Cause both carry an 8-bit interrupt field at bits 15..8:
 // which lines are pending, and which of them are unmasked.
@@ -72,6 +85,11 @@ u32 rd(u32 instr) { return (instr >> 11) & 0x1F; }
 
 // Shift amount, 0-31, used by the constant-distance shift ops.
 u32 shamt(u32 instr) { return (instr >> 6) & 0x1F; }
+
+// Which coprocessor an instruction is addressed to. The four COPz
+// opcodes are consecutive, and so are the four LWCz and the four
+// SWCz, so the number is always the opcode's low two bits.
+u32 coprocessor_of(u32 instr) { return (instr >> 26) & 3; }
 
 // The I-format immediate, zero-extended (logical ops treat it so).
 u32 imm(u32 instr) { return instr & 0xFFFF; }
@@ -177,10 +195,18 @@ u32 Cpu::step()
     load_value = 0;
 
     if (current_pc % 4 != 0) {
-        // A jump to a misaligned address faults on the fetch itself.
+        // A jump to a misaligned address faults on the fetch itself,
+        // before anything reads memory.
         raise_address_error(Exception::AddressLoad, current_pc);
+    } else if (const std::optional<u32> fetched = bus.fetch(current_pc);
+               !fetched.has_value()) {
+        // Nothing answered, so there is no instruction here to run —
+        // the scratchpad, or a region no memory is mapped to. A jump
+        // to one of those is not itself refused, and the fault lands
+        // on the target: epc points here rather than at the jump.
+        raise_exception(Exception::BusErrorFetch);
     } else {
-        const u32 instr = bus.read32(current_pc);
+        const u32 instr = *fetched;
 
         // An interrupt cannot call a GTE command back: by the time one
         // could be taken the command has already reached the
@@ -199,15 +225,6 @@ u32 Cpu::step()
             // Taken in place of the instruction, which re-runs on return.
             raise_exception(Exception::Interrupt);
         } else {
-            // The fetch is not billed. There is an instruction cache on the
-            // R3000A and none here, so code running from RAM — which is
-            // nearly all of it — fetches at one cycle on hardware and would
-            // cost seven if this counted it. Charging nothing is the closer
-            // of the two answers until the cache is modelled; the price is
-            // that the BIOS's own uncached run out of ROM, which nothing
-            // times, comes out faster than it really is.
-            bus.stall_cycles = 0;
-
             // Advance both counters before executing, so a branch taken by
             // this instruction rewrites next_pc while pc — already pointing
             // at the delay slot — is left alone.
@@ -302,6 +319,28 @@ void Cpu::raise_address_error(Exception code, u32 addr)
 {
     bad_vaddr = addr;
     raise_exception(code);
+}
+
+void Cpu::raise_coprocessor_unusable(u32 number)
+{
+    cause &= ~CAUSE_COPROCESSOR;
+    cause |= number << CAUSE_COPROCESSOR_SHIFT;
+    raise_exception(Exception::CoprocessorUnusable);
+}
+
+bool Cpu::coprocessor_enabled(u32 number) const
+{
+    return (sr & (SR_COPROCESSOR_ENABLE << number)) != 0;
+}
+
+bool Cpu::coprocessor_usable(u32 number) const
+{
+    // Kernel mode reaches COP0 with the enable clear, which is how the
+    // BIOS gets at the status register without ever setting it.
+    // Hardware does not extend that to LWC0/SWC0: those fault with the
+    // bit clear even in the kernel, so they ask coprocessor_enabled.
+    const bool kernel_cop0 = number == 0 && (sr & SR_USER_MODE) == 0;
+    return kernel_cop0 || coprocessor_enabled(number);
 }
 
 u32 Cpu::cause_register() const
@@ -429,10 +468,36 @@ void Cpu::execute(u32 instr)
         // an ORI supplies the low half.
         set_reg(rt(instr), imm(instr) << 16);
         break;
+    // The four coprocessor slots the R3000A defines. Each has an
+    // enable bit in SR, and reaching for one that is switched off is a
+    // Coprocessor Unusable exception rather than a gap in this
+    // emulator: a program that wants the geometry engine has to switch
+    // it on first, and software switches one off deliberately to find
+    // out what the machine does then.
     case 0x10:
+        if (!coprocessor_usable(0)) {
+            raise_coprocessor_unusable(0);
+            break;
+        }
         execute_cop0(instr);
         break;
+    case 0x11:
+    case 0x13: {
+        // COP1, an FPU, and COP3 are slots this console leaves empty.
+        // Switched off they fault like any other; switched on there is
+        // nothing behind them to answer, and the instruction does
+        // nothing at all.
+        const u32 number = coprocessor_of(instr);
+        if (!coprocessor_usable(number)) {
+            raise_coprocessor_unusable(number);
+        }
+        break;
+    }
     case 0x12:
+        if (!coprocessor_usable(2)) {
+            raise_coprocessor_unusable(2);
+            break;
+        }
         execute_cop2(instr);
         break;
 
@@ -516,7 +581,7 @@ void Cpu::execute(u32 instr)
             break;  // cache writes, not memory — ignore for now
         }
         const u32 addr = reg(rs(instr)) + imm_se(instr);
-        bus.write8(addr, static_cast<u8>(reg(rt(instr))));
+        bus.write8(addr, reg(rt(instr)));
         break;
     }
     case 0x29: {  // SH
@@ -528,7 +593,7 @@ void Cpu::execute(u32 instr)
             raise_address_error(Exception::AddressStore, addr);
             break;
         }
-        bus.write16(addr, static_cast<u16>(reg(rt(instr))));
+        bus.write16(addr, reg(rt(instr)));
         break;
     }
     case 0x2A: {  // SWL — the store side, same shape as LWL
@@ -574,6 +639,10 @@ void Cpu::execute(u32 instr)
     // is no load delay: the value lands in a coprocessor register, not
     // in one the next instruction might read.
     case 0x32: {  // LWC2
+        if (!coprocessor_enabled(2)) {
+            raise_coprocessor_unusable(2);
+            break;
+        }
         const u32 addr = reg(rs(instr)) + imm_se(instr);
         if (addr % 4 != 0) {
             raise_address_error(Exception::AddressLoad, addr);
@@ -583,12 +652,33 @@ void Cpu::execute(u32 instr)
         break;
     }
     case 0x3A: {  // SWC2
+        if (!coprocessor_enabled(2)) {
+            raise_coprocessor_unusable(2);
+            break;
+        }
         const u32 addr = reg(rs(instr)) + imm_se(instr);
         if (addr % 4 != 0) {
             raise_address_error(Exception::AddressStore, addr);
             break;
         }
         bus.write32(addr, gte.read_data(rt(instr)));
+        break;
+    }
+    // The same load and store for the three slots with nothing in
+    // them. There is no register to move a word to or from, so all
+    // that is left of the instruction is the enable bit it checks —
+    // and that check is the whole of it, including for COP0, which
+    // kernel mode does not excuse here the way it does MFC0.
+    case 0x30:    // LWC0
+    case 0x31:    // LWC1
+    case 0x33:    // LWC3
+    case 0x38:    // SWC0
+    case 0x39:    // SWC1
+    case 0x3B: {  // SWC3
+        const u32 number = coprocessor_of(instr);
+        if (!coprocessor_enabled(number)) {
+            raise_coprocessor_unusable(number);
+        }
         break;
     }
     default:
@@ -770,11 +860,29 @@ void Cpu::execute_special(u32 instr)
 // COP0 to system control and COP2 to the GTE, the geometry engine
 // that transforms 3D vertices. COP1 (an FPU) and COP3 are absent.
 //
-// The rs field, a register number in ordinary instructions, is the
-// operation selector here: move from / move to the coprocessor, or
-// a coprocessor-specific op such as RFE.
+// Bit 25 says which half of the encoding an instruction is in: with
+// it clear the rs field selects a move to or from the coprocessor,
+// and with it set the instruction is one of the coprocessor's own
+// operations, of which RFE is the only one this one has.
 void Cpu::execute_cop0(u32 instr)
 {
+    // Bit 25 splits the encoding the same way it does for COP2: with
+    // it set the instruction is one of the coprocessor's own
+    // operations rather than a move.
+    constexpr u32 OPERATION_BIT = 1 << 25;
+    if ((instr & OPERATION_BIT) != 0) {
+        // RFE is the only operation this coprocessor has. The rest of
+        // that encoding space is not refused — the console runs it
+        // without complaint and without doing anything — so there is
+        // nothing here to report as missing.
+        constexpr u32 RFE = 0x10;
+        if ((instr & 0x3F) == RFE) {
+            // Pop the mode stack the exception pushed.
+            sr = (sr & ~0xFu) | ((sr >> 2) & 0xF);
+        }
+        return;
+    }
+
     switch (rs(instr)) {
     case 0x00:  // MFC0 (value arrives via the load delay slot)
         switch (rd(instr)) {
@@ -858,17 +966,6 @@ void Cpu::execute_cop0(u32 instr)
             }
             break;
         }
-        break;
-    case 0x10:  // RFE: pop the mode stack pushed by the exception
-        // Not a move at all — the funct field distinguishes the
-        // coprocessor's own operations, of which RFE is the only one
-        // the BIOS uses.
-        if ((instr & 0x3F) != 0x10) {
-            halt(std::format(
-                "unhandled COP0 op {:08X} at {:08X}", instr, current_pc));
-            break;
-        }
-        sr = (sr & ~0xFu) | ((sr >> 2) & 0xF);
         break;
     default:
         halt(std::format("unhandled COP0 {:08X} at {:08X}", instr, current_pc));

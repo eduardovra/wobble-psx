@@ -13,6 +13,12 @@ constexpr u32 MODE = 0x1F801048;
 constexpr u32 CONTROL = 0x1F80104A;
 constexpr u32 BAUD = 0x1F80104E;
 
+// JOY_MODE. Nine of the halfword's bits are real — the baud divider,
+// the character length, the two parity bits and the clock polarity —
+// and the rest do not exist, so they read back as zero whatever is
+// written over them.
+constexpr u16 MODE_WRITABLE = 0x013F;
+
 // JOY_CTRL.
 constexpr u16 CONTROL_SELECT = 1 << 1;
 constexpr u16 CONTROL_ACKNOWLEDGE = 1 << 4;
@@ -218,7 +224,7 @@ bool Sio::write_register(u32 phys, u32 value)
     }
 
     case MODE:
-        mode = static_cast<u16>(value);
+        mode = static_cast<u16>(value) & MODE_WRITABLE;
         return false;
     case BAUD:
         baud = static_cast<u16>(value);

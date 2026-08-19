@@ -24,6 +24,11 @@ constexpr u32 DICR_FLAG_SHIFT = 24;
 constexpr u32 DICR_CHANNEL_MASK = 0x7F;
 constexpr u32 DICR_ACTIVE = 1u << 31;
 
+// MADR is 24 bits wide: it addresses RAM, and two megabytes of it
+// need no more. The byte above them does not exist, so an address
+// written with one set reads back without it.
+constexpr u32 MADR_MASK = 0x00FFFFFF;
+
 // Register offsets within the controller's range.
 constexpr u32 CHANNEL_STRIDE = 0x10;
 constexpr u32 CHANNEL_REGION_END = 0x70;
@@ -218,7 +223,7 @@ Dma::Written Dma::write_register(u32 phys, u32 value)
         Channel& channel = channels[index];
         switch (offset % CHANNEL_STRIDE) {
         case 0x0:
-            channel.base = word;
+            channel.base = word & MADR_MASK;
             break;
         case 0x4:
             channel.block = word;

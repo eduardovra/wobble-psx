@@ -42,6 +42,12 @@ struct Irq {
     static constexpr u32 STATUS = 0x1F801070;
     static constexpr u32 MASK = 0x1F801074;
 
+    // The eleven lines above are all the register has. The bits past
+    // them do not exist: they read back as zero however they are
+    // written, which is what a game finds when it writes a mask wider
+    // than the machine.
+    static constexpr u16 LINES = 0x07FF;
+
     void reset();
 
     void visit_state(State& state);

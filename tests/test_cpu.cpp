@@ -393,3 +393,127 @@ TEST_CASE("MFC0 reads back through the load delay slot")
     CHECK(m.reg(t1) == 0);
     CHECK(m.reg(t2) == (1u << 10));
 }
+
+// The coprocessor slots. Software switches one off deliberately to
+// see what happens, so these are answers the console gives rather
+// than gaps in this emulator.
+namespace {
+
+constexpr u32 SR_COP0 = 1u << 28;
+constexpr u32 SR_COP1 = 1u << 29;
+constexpr u32 SR_COP2 = 1u << 30;
+constexpr u32 SR_COP3 = 1u << 31;
+
+constexpr u32 COPROCESSOR_UNUSABLE = 0xB;
+
+// Which coprocessor the exception was about, from Cause's CE field.
+u32 blamed_coprocessor(const Machine& m) { return (m.cpu.cause >> 28) & 3; }
+
+constexpr u32 mfc2(u32 rt) { return 0x48000000 | (rt << 16); }
+constexpr u32 cop1_op() { return 0x11u << 26; }
+constexpr u32 cop3_op() { return 0x13u << 26; }
+
+// SWC3 $1, 0($zero) — a store to a coprocessor that is not there.
+constexpr u32 swc3() { return (0x3Bu << 26) | (1u << 16); }
+
+// JR, the only jump that can leave its 256 MB region, which is what
+// reaching the scratchpad from a program in RAM takes.
+constexpr u32 jr(u32 rs) { return mips::r_type(rs, 0, 0, 0, 0x08); }
+
+}  // namespace
+
+TEST_CASE("reaching a coprocessor that is switched off traps")
+{
+    using namespace mips;
+
+    Machine m;
+    m.cpu.sr = 0;  // COP2 off: the geometry engine is out of reach
+    m.load({mfc2(t0), nop()});
+    m.run(2);
+
+    CHECK(m.exc_code() == COPROCESSOR_UNUSABLE);
+    CHECK(blamed_coprocessor(m) == 2);
+    CHECK(m.reg(t0) == 0);
+    CHECK_FALSE(m.cpu.halted);
+}
+
+TEST_CASE("the empty slots trap only while they are switched off")
+{
+    Machine m;
+    m.cpu.sr = 0;
+    m.load({cop1_op()});
+    m.run(1);
+
+    CHECK(m.exc_code() == COPROCESSOR_UNUSABLE);
+    CHECK(blamed_coprocessor(m) == 1);
+
+    // Switched on there is still nothing behind them, so the
+    // instruction is neither refused nor does anything.
+    Machine enabled;
+    enabled.cpu.sr = SR_COP1 | SR_COP3;
+    enabled.load({cop1_op(), cop3_op()});
+    enabled.run(2);
+
+    CHECK(enabled.exc_code() == 0);
+    CHECK_FALSE(enabled.cpu.halted);
+}
+
+TEST_CASE("the kernel reaches COP0 with its enable clear")
+{
+    using namespace mips;
+
+    Machine m;
+    m.cpu.sr = 0;  // COP0 enable clear, but this is kernel mode
+    m.load({mfc0(t0, 12), nop()});
+    m.run(2);
+
+    CHECK(m.exc_code() == 0);
+    CHECK(m.reg(t0) == 0);
+    CHECK_FALSE(m.cpu.halted);
+}
+
+TEST_CASE("a coprocessor store asks the enable bit and nothing else")
+{
+    Machine m;
+    m.cpu.sr = 0;  // kernel mode does not excuse SWCz the way it does MFC0
+    m.load({swc3()});
+    m.run(1);
+
+    CHECK(m.exc_code() == COPROCESSOR_UNUSABLE);
+    CHECK(blamed_coprocessor(m) == 3);
+
+    Machine enabled;
+    enabled.cpu.sr = SR_COP0 | SR_COP3;
+    enabled.load({swc3()});
+    enabled.run(1);
+
+    CHECK(enabled.exc_code() == 0);
+    CHECK_FALSE(enabled.cpu.halted);
+}
+
+TEST_CASE("an operation COP0 does not have does nothing")
+{
+    Machine m;
+    m.cpu.sr = SR_COP0 | SR_COP2;
+    m.load({0x43E00000});  // cop0 1Fh, which the console runs and ignores
+    m.run(1);
+
+    CHECK(m.exc_code() == 0);
+    CHECK_FALSE(m.cpu.halted);
+}
+
+TEST_CASE("jumping somewhere with no instructions raises a bus error")
+{
+    using namespace mips;
+
+    Machine m;
+    m.bus->write32(Bus::SCRATCHPAD_START, addiu(t0, zero, 1));
+    // The jump itself is not refused; the fault lands on its target.
+    m.load({lui(t1, 0x1F80), jr(t1), nop()});
+    m.run(4);
+
+    CHECK(m.exc_code() == 6);
+    CHECK(m.cpu.epc == Bus::SCRATCHPAD_START);
+    CHECK(m.reg(t0) == 0);
+    CHECK_FALSE(m.cpu.halted);
+}

@@ -76,12 +76,31 @@ struct Bus {
     // device sees, and some of them answer differently next time
     // because of it. GPUREAD hands back the next pixel of a transfer
     // and steps past it, which a const read could not do.
+    //
+    // A write takes the whole register the store came from rather than
+    // the byte or halfword its width names. Memory keeps the part that
+    // fits, but a hardware register is on the far side of a 32-bit bus
+    // that carries all of it whatever the width was, and most devices
+    // do not read the byte enables that say which part was meant: a
+    // byte written to the DMA controller replaces the register it
+    // lands in, all four bytes of it. So the width is passed down
+    // beside the value and each device decides how much to take.
     u8 read8(u32 addr);
     u16 read16(u32 addr);
     u32 read32(u32 addr);
-    void write8(u32 addr, u8 value);
-    void write16(u32 addr, u16 value);
+    void write8(u32 addr, u32 value);
+    void write16(u32 addr, u32 value);
     void write32(u32 addr, u32 value);
+
+    // Reads the instruction at `addr`, or nothing when there is no
+    // instruction there to fetch. Hardware answers a fetch from a
+    // region no memory is mapped to — the gaps between the hardware
+    // registers included — with a bus error, and the scratchpad is
+    // refused whatever is in it: it is the data cache wired up as
+    // memory, and code cannot be run from it at all. Saying so is the
+    // point of this being separate from read32, which has to answer
+    // something.
+    std::optional<u32> fetch(u32 addr);
 
     // Side-effect-free accessors for a debugger looking at memory.
     // Reading a hardware register is an event the device reacts to,

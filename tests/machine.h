@@ -31,6 +31,12 @@ struct Machine {
     LooseBus bus;
     Cpu cpu{*bus};
 
+    // The geometry engine is behind SR's COP2 enable, and a program
+    // that wants it switches it on before its first instruction
+    // reaches it — so this stands in for that, and the tests below can
+    // be about the engine rather than about the bit.
+    Machine() { cpu.sr |= 1u << 30; }
+
     // Places a program at CODE and points the CPU at it, replacing
     // the BIOS reset vector that Cpu starts from.
     void load(std::initializer_list<u32> program)
