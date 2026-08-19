@@ -459,7 +459,12 @@ void Gpu::execute_gp0()
 
     switch (op) {
     case 0x00:  // NOP
-    case 0x01:  // clear texture cache
+    case 0x01:
+        // Clear cache. The palette the GPU is holding goes with it, so
+        // the next textured primitive reads its own out of VRAM again.
+        // This is the only thing that lets go of it: a fill or a line
+        // drawn over the palette leaves the held copy alone.
+        clut_entries = 0;
         return;
     case 0x1F:  // raise the GPU's interrupt
         irq = true;

@@ -170,6 +170,19 @@ struct Gpu {
 
     std::array<u16, VRAM_PIXELS> vram{};
 
+    // The palette the GPU is holding. A textured primitive's palette is
+    // read out of VRAM once, before any of the primitive is drawn, and
+    // stays until one asks for a different palette — or for more of one
+    // than was read, which is what a 4-bit primitive followed by an
+    // 8-bit one does. Overwriting the palette in VRAM in between
+    // changes nothing until then. gpu/clut-cache is built around that,
+    // and it is also what lets a sprite be drawn straight over its own
+    // palette without eating itself halfway across.
+    static constexpr u32 CLUT_ENTRIES = 256;
+    std::array<u16, CLUT_ENTRIES> clut{};
+    u32 clut_source = 0;   // the CLUT word the held entries came from
+    u32 clut_entries = 0;  // how many of them were read
+
     Gp0Mode mode = Gp0Mode::Command;
     Transfer transfer;
 
