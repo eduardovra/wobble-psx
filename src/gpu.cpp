@@ -142,10 +142,23 @@ Gpu::Colour Gpu::display_pixel(u32 x, u32 y) const
 
     const u32 start_x = display_start & 0x3FF;
     const u32 start_y = (display_start >> 10) & 0x1FF;
-    const std::size_t at =
-        std::size_t{(start_y + y) % VRAM_HEIGHT} * VRAM_WIDTH +
-        (start_x + x) % VRAM_WIDTH;
-    const u16 pixel = vram[at];
+    const std::size_t line =
+        std::size_t{(start_y + y) % VRAM_HEIGHT} * VRAM_WIDTH;
+
+    if (colour_24bit()) {
+        // Three bytes to the pixel, laid end to end across the
+        // halfwords rather than packed inside them, so the line is
+        // addressed in bytes and every third pixel straddles a
+        // halfword boundary.
+        const auto byte_at = [&](u32 offset) {
+            const u32 within = (start_x * 2 + offset) % (VRAM_WIDTH * 2);
+            const u16 pair = vram[line + within / 2];
+            return static_cast<u8>(pair >> ((within & 1) * 8));
+        };
+        return {byte_at(x * 3), byte_at(x * 3 + 1), byte_at(x * 3 + 2)};
+    }
+
+    const u16 pixel = vram[line + (start_x + x) % VRAM_WIDTH];
 
     // Five bits to eight, with the top bits repeated into the bottom
     // ones so that a full-brightness channel comes out full rather

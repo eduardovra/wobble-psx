@@ -155,6 +155,14 @@ bool Dma::channel_ready(u32 channel) const
 
 bool Dma::complete(u32 channel)
 {
+    // The enable bit gates the flag itself, so a transfer that
+    // finishes while its channel is switched off leaves nothing
+    // behind. Otherwise a game that enables the interrupt afterwards
+    // would find the line already up and never see it rise again.
+    const u32 enabled = (interrupt >> DICR_ENABLE_SHIFT) & DICR_CHANNEL_MASK;
+    if ((enabled & (1u << channel)) == 0) {
+        return false;
+    }
     const bool was_active = interrupt_active();
     interrupt |= 1u << (DICR_FLAG_SHIFT + channel);
     return !was_active && interrupt_active();
@@ -162,8 +170,14 @@ bool Dma::complete(u32 channel)
 
 u32 Dma::read_register(u32 phys) const
 {
-    const u32 offset = phys - BASE;
+    // A read of part of a register is the whole one, moved down to
+    // where the bytes asked for start; the caller keeps as many of
+    // them as it wanted.
+    return whole_register((phys - BASE) & ~3u) >> lane_shift(phys);
+}
 
+u32 Dma::whole_register(u32 offset) const
+{
     if (offset < CHANNEL_REGION_END) {
         const Channel& channel = channels[offset / CHANNEL_STRIDE];
         switch (offset % CHANNEL_STRIDE) {
@@ -188,56 +202,68 @@ u32 Dma::read_register(u32 phys) const
     return 0;
 }
 
-u32 Dma::write_register(u32 phys, u32 value)
+u32 Dma::lane_shift(u32 phys) { return (phys & 3) * 8; }
+
+Dma::Written Dma::write_register(u32 phys, u32 value)
 {
-    const u32 offset = phys - BASE;
+    // A narrower store still drives the whole bus and these registers
+    // take all of it — the byte enables go unread — so what lands is
+    // the value moved up into the lane its address named, and the
+    // bytes beside it are replaced rather than kept.
+    const u32 word = value << lane_shift(phys);
+    const u32 offset = (phys - BASE) & ~3u;
 
     if (offset < CHANNEL_REGION_END) {
         const u32 index = offset / CHANNEL_STRIDE;
         Channel& channel = channels[index];
         switch (offset % CHANNEL_STRIDE) {
         case 0x0:
-            channel.base = value;
+            channel.base = word;
             break;
         case 0x4:
-            channel.block = value;
+            channel.block = word;
             break;
         case 0x8:
-            channel.control = value;
+            channel.control = word;
             if (index == OTC_CHANNEL) {
                 // Built to walk backwards through a block of RAM, and
                 // nothing software writes changes that.
-                channel.control = (value & OTC_WRITABLE) | CHCR_DECREASING;
+                channel.control = (word & OTC_WRITABLE) | CHCR_DECREASING;
             }
             break;
         default:
             break;
         }
-        return channel_ready(index) ? index : NO_CHANNEL;
+        return {channel_ready(index) ? index : NO_CHANNEL, false};
     }
 
     if (offset == DPCR_OFFSET) {
-        control = value;
+        control = word;
         // Switching a channel on can start one that was already
         // waiting with its CHCR bits set.
         for (u32 index = 0; index < CHANNEL_COUNT; index++) {
             if (channel_ready(index)) {
-                return index;
+                return {index, false};
             }
         }
-        return NO_CHANNEL;
+        return {};
     }
 
     if (offset == DICR_OFFSET) {
+        const bool was_active = interrupt_active();
         // The per-channel flags are acknowledged by writing a one to
         // them, the opposite of the interrupt controller's I_STAT. Any
         // flag not named in the write stays raised.
-        const u32 acknowledged = (value >> DICR_FLAG_SHIFT) & DICR_CHANNEL_MASK;
+        const u32 acknowledged = (word >> DICR_FLAG_SHIFT) & DICR_CHANNEL_MASK;
         u32 flags = (interrupt >> DICR_FLAG_SHIFT) & DICR_CHANNEL_MASK;
         flags &= ~acknowledged;
-        interrupt = (value & DICR_WRITABLE) | (flags << DICR_FLAG_SHIFT);
+        interrupt = (word & DICR_WRITABLE) | (flags << DICR_FLAG_SHIFT);
+        // Forcing the top bit, or enabling a channel that has already
+        // flagged, raises the line as much as a transfer finishing
+        // does.
+        return {NO_CHANNEL, !was_active && interrupt_active()};
     }
-    return NO_CHANNEL;
+    return {};
 }
 
 namespace {

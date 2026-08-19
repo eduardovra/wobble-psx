@@ -184,11 +184,13 @@ TEST_CASE("a completed channel interrupts only when it is allowed to")
         bus->write32(chcr(OTC_CHANNEL), START | DECREASING);
     };
 
-    SUBCASE("with the channel's interrupt disabled, nothing is raised")
+    SUBCASE("with the channel's interrupt disabled, nothing is recorded")
     {
         run_otc();
-        // The flag is still recorded; it just cannot reach the CPU.
-        CHECK((bus->read32(DICR) & flag) != 0);
+        // The enable is what lets the flag be set at all, so a
+        // transfer that finishes without one leaves nothing behind for
+        // a later enable to find.
+        CHECK((bus->read32(DICR) & flag) == 0);
         CHECK((bus->read32(DICR) & (1u << 31)) == 0);
         CHECK_FALSE(bus->irq.active());
     }
@@ -232,6 +234,56 @@ TEST_CASE("a DICR flag is acknowledged by writing a one to it")
     CHECK((bus->read32(DICR) & flag) == 0);
     // And the computed master flag follows it down.
     CHECK((bus->read32(DICR) & (1u << 31)) == 0);
+}
+
+TEST_CASE("a write that raises the master flag interrupts on its own")
+{
+    const LooseBus bus;
+    constexpr u32 MASTER_ENABLE = 1u << 23;
+    bus->irq.mask = 1u << static_cast<u32>(Interrupt::Dma);
+
+    // A flag with its channel enabled but the master switched off: the
+    // line is down until the write that brings it up.
+    bus->write32(DPCR, ALL_CHANNELS_ENABLED);
+    bus->write32(DICR, 1u << (16 + OTC_CHANNEL));
+    bus->write32(madr(OTC_CHANNEL), SCRATCH);
+    bus->write32(bcr(OTC_CHANNEL), 2);
+    bus->write32(chcr(OTC_CHANNEL), START | DECREASING);
+    REQUIRE_FALSE(bus->irq.active());
+
+    bus->write32(DICR, MASTER_ENABLE | (1u << (16 + OTC_CHANNEL)));
+    CHECK(bus->irq.active());
+}
+
+TEST_CASE("a register is written a byte at a time as well as whole")
+{
+    const LooseBus bus;
+    constexpr u32 MASTER_ENABLE = 1u << 23;
+    const u32 flag = 1u << (24 + OTC_CHANNEL);
+
+    bus->write32(DPCR, ALL_CHANNELS_ENABLED);
+    bus->write32(madr(OTC_CHANNEL), SCRATCH);
+    bus->write32(bcr(OTC_CHANNEL), 2);
+
+    // DICR's enables live in its third byte, which is how a game
+    // switches one channel's interrupt on and off around a transfer it
+    // wants to hear about.
+    const u32 enables = Dma::BASE + 0x74 + 2;
+    bus->write8(enables, (MASTER_ENABLE | (1u << (16 + OTC_CHANNEL))) >> 16);
+    CHECK(bus->read8(enables) == (0x80 | (1u << OTC_CHANNEL)));
+
+    bus->write32(chcr(OTC_CHANNEL), START | DECREASING);
+    REQUIRE((bus->read32(DICR) & flag) != 0);
+
+    // And a byte write that names none of the flags leaves them alone,
+    // rather than acknowledging every one it did not mean to touch.
+    bus->write8(enables, 0x80);
+    CHECK((bus->read32(DICR) & flag) != 0);
+
+    // What it does not do is keep the bytes it passed over. The
+    // register takes the whole word the bus carried, so the enable it
+    // just cleared is cleared and not merged back in.
+    CHECK((bus->read32(DICR) & (1u << (16 + OTC_CHANNEL))) == 0);
 }
 
 TEST_CASE("forcing the interrupt needs neither a flag nor an enable")

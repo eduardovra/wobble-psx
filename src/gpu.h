@@ -71,6 +71,12 @@ struct Gpu {
 
     bool interlaced() const { return ((display_mode >> 5) & 1) != 0; }
 
+    // Whether the video signal reads VRAM three bytes to the pixel
+    // instead of one halfword. Nothing can be drawn in that form — the
+    // GPU only carries it — so it is a mode for a still or a movie,
+    // put into VRAM by whatever decoded it.
+    bool colour_24bit() const { return ((display_mode >> 4) & 1) != 0; }
+
     u32 status() const;
 
     // GP0(E1h) as it may be stored, and the part of it a textured

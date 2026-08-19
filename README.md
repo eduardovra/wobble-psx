@@ -53,8 +53,9 @@ occupies unpacked, and it starts the moment it is asked to. The
 decompression is [libchdr](https://github.com/rtissera/libchdr)'s,
 which is what MAME reads the format with.
 
-Games boot, run their startup, draw and make sound. None is playable
-yet.
+Games boot, run their startup, draw and make sound. Symphony of the
+Night plays its opening movie and waits at its title screen; Resident
+Evil 2 reaches its menu. None is playable yet.
 
 ## Video
 
@@ -79,6 +80,12 @@ What is not the same is the last bit of arithmetic. Against the
 and rounds once, where the hardware's rounds somewhere inside, and
 nobody has worked out where. It is a step of brightness on some pixels
 of a photograph and cannot be seen in a moving one.
+
+A movie is shown in the display mode the still pictures never use:
+three bytes to the pixel rather than a packed halfword, which the GPU
+cannot draw into and only carries. The video signal reads VRAM as bytes
+when GP1(08h) asks it to, so what the MDEC decoded arrives on screen as
+the colours it decoded rather than as every third pixel of them.
 
 The timing is not the hardware's either. A real MDEC decodes while the
 data-in channel is still feeding it and stalls that channel when it

@@ -86,20 +86,33 @@ struct Dma {
 
     void visit_state(State& state);
 
+    // Every register here is a word, and software need not read or
+    // write it as one — a game switches one channel's interrupt on by
+    // writing the byte its enable lives in. What a narrower access
+    // names is the byte lane it starts at, since the bus carries the
+    // whole word either way and these registers ignore the byte
+    // enables that would narrow it.
     u32 read_register(u32 phys) const;
 
-    // Returns the channel this write may have started, or NO_CHANNEL.
-    // The caller runs it, because moving the words needs the rest of
-    // the machine and this holds only the registers.
-    u32 write_register(u32 phys, u32 value);
-
     static constexpr u32 NO_CHANNEL = CHANNEL_COUNT;
+
+    // What a write leaves for the caller to do, since both of them
+    // need the rest of the machine and this holds only the registers.
+    struct Written {
+        u32 channel = NO_CHANNEL;  // a transfer the write started
+        bool interrupt = false;    // it brought the interrupt line up
+    };
+
+    Written write_register(u32 phys, u32 value);
 
     // Whether a channel is both switched on in DPCR and started.
     bool channel_ready(u32 channel) const;
 
     // Records that a channel finished, and reports whether that has
-    // brought the controller's interrupt line up.
+    // brought the controller's interrupt line up. A channel whose
+    // interrupt DICR has not enabled does not even raise its flag:
+    // the enable is what lets the flag be set, not what lets a flag
+    // already set through.
     bool complete(u32 channel);
 
     std::array<Channel, CHANNEL_COUNT> channels{};
@@ -113,7 +126,17 @@ private:
     // software forces it. Read-only, so it is computed rather than
     // stored — which means acknowledging the last channel flag lowers
     // it with no write of its own.
+    //
+    // It is the moment it goes up that reaches the interrupt
+    // controller, not the level, so a write that raises it counts as
+    // much as a transfer finishing does.
     bool interrupt_active() const;
+
+    // A register as a whole, by its offset from BASE.
+    u32 whole_register(u32 offset) const;
+
+    // How far into its word the byte an address names sits.
+    static u32 lane_shift(u32 phys);
 };
 
 // Runs a channel's transfer to completion. Lives outside Dma because

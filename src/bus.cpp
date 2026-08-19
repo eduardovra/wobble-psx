@@ -196,15 +196,18 @@ bool Bus::write_io(u32 phys, u32 value, u32 width)
     if (phys >= Dma::BASE && phys < Dma::END) {
         // A write to CHCR is what starts a transfer, so it happens
         // here, inside the store instruction that asked for it.
-        const u32 channel = dma.write_register(phys, value);
-        if (channel != Dma::NO_CHANNEL) {
+        const Dma::Written written = dma.write_register(phys, value);
+        if (written.interrupt) {
+            irq.raise(Interrupt::Dma);
+        }
+        if (written.channel != Dma::NO_CHANNEL) {
             // The whole transfer happens inside this store, and costs
             // it nothing: run_dma reaches RAM directly rather than
             // through the read paths above, so none of its accesses
             // are billed. DMA does take the bus away from the CPU on
             // hardware, but charging that means running the transfer
             // on the scheduler rather than all at once here.
-            run_dma(*this, channel);
+            run_dma(*this, written.channel);
         }
         return true;
     }
