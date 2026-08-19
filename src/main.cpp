@@ -4,6 +4,7 @@
 
 #include <algorithm>
 #include <array>
+#include <cstdio>
 #include <string>
 #include <vector>
 
@@ -342,6 +343,38 @@ void log_new_tty_lines(const Cpu& cpu, size_t& logged_upto)
     }
 }
 
+// What the program is and how to ask it for something, for a reader
+// who has only the binary. The controls are part of it because a
+// keyboard is the only pad there is, and nothing on screen says so.
+void print_usage()
+{
+    std::puts(R"(wobble - a PlayStation 1 emulator
+
+Usage: wobble [bios] [game] [options]
+
+  bios              a BIOS image to boot (default: SCPH1001.BIN)
+  game              a .zip, .cue or .chd to put in the drive
+
+Options:
+  --disc PATH       put PATH in the drive, whatever it is named
+                    (.bin and .iso images need this, since a .bin is
+                    as likely to be the BIOS as a disc)
+  --exe PATH        boot the BIOS, then side-load a PS-EXE in place of
+                    a disc's program
+  -h, --help        show this and exit
+
+Controls (the keyboard is the pad in the first socket):
+  arrow keys        d-pad
+  X  S  Z  A        cross, circle, square, triangle
+  Q  W  E  R        L1, L2, R1, R2
+  Enter  RShift     start, select
+
+Examples:
+  wobble SCPH1001.BIN
+  wobble SCPH1001.BIN "Ridge Racer (USA).zip"
+  wobble SCPH1001.BIN --exe program.exe)");
+}
+
 }  // namespace
 
 int main(int argc, char** argv)
@@ -352,6 +385,10 @@ int main(int argc, char** argv)
 
     for (int i = 1; i < argc; i++) {
         const std::string argument = argv[i];
+        if (argument == "-h" || argument == "--help") {
+            print_usage();
+            return 0;
+        }
         if (argument == "--exe" && i + 1 < argc) {
             exe_path = argv[++i];
         } else if (argument == "--disc" && i + 1 < argc) {
@@ -364,6 +401,13 @@ int main(int argc, char** argv)
             // as likely to be the BIOS as a disc, so that one still
             // has to say which it is.
             disc_path = argument;
+        } else if (argument.starts_with("-")) {
+            // Anything else beginning with a dash is a mistyped
+            // option, not a file to boot: taking it for one would
+            // fail much later and say the wrong thing about why.
+            std::fprintf(stderr, "unknown option: %s\n", argument.c_str());
+            print_usage();
+            return 1;
         } else {
             bios_path = argument;
         }
