@@ -71,6 +71,10 @@ struct Gpu {
 
     bool interlaced() const { return ((display_mode >> 5) & 1) != 0; }
 
+    // Whether the signal is the 50 Hz one. It carries more scanlines,
+    // and the picture sits at a different place among them.
+    bool pal() const { return ((display_mode >> 3) & 1) != 0; }
+
     // Whether the video signal reads VRAM three bytes to the pixel
     // instead of one halfword. Nothing can be drawn in that form — the
     // GPU only carries it — so it is a mode for a still or a movie,
@@ -106,6 +110,10 @@ struct Gpu {
     // put the picture on a screen.
     u32 display_width() const;
     u32 display_height() const;
+
+    // The scanline a full-height picture starts on, which is what the
+    // range GP1(07h) carries is measured against.
+    u32 first_scanline() const;
 
     // How many of the GPU's own cycles one pixel of the display lasts.
     // A wider mode clocks pixels out faster, so this falls as the
@@ -193,9 +201,11 @@ struct Gpu {
     // later leaves a bit already taken in place.
     bool allow_texture_disable = false;
 
-    u32 display_start = 0;    // GP1(05h)
-    u32 display_range_x = 0;  // GP1(06h)
-    u32 display_range_y = 0;  // GP1(07h)
+    // The ranges come up holding a full-height NTSC picture, which is
+    // where a reset puts them too — see reset().
+    u32 display_start = 0;             // GP1(05h)
+    u32 display_range_x = 0x00C00200;  // GP1(06h)
+    u32 display_range_y = 0x00040010;  // GP1(07h)
     DmaDirection dma_direction = DmaDirection::Off;
     bool display_disabled = true;  // the GPU powers up blanked
     bool irq = false;              // GP0(1Fh) sets it, GP1(02h) clears

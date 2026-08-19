@@ -134,16 +134,59 @@ u32 Gpu::display_height() const
     return tall && interlaced() ? 480 : 240;
 }
 
+// Scanlines are counted from vsync, and the middle of the frame — the
+// scanline the picture is centred on — is 88h on NTSC and A3h on PAL.
+// A picture of the full height reaches half of itself either side of
+// it, which is where GP1(07h) is left by a reset.
+u32 Gpu::first_scanline() const
+{
+    constexpr u32 NTSC_MIDDLE = 0x88;
+    constexpr u32 PAL_MIDDLE = 0xA3;
+    constexpr u32 NTSC_LINES = 240;
+    constexpr u32 PAL_LINES = 288;
+    if (pal()) {
+        return PAL_MIDDLE - PAL_LINES / 2;
+    }
+    return NTSC_MIDDLE - NTSC_LINES / 2;
+}
+
 Gpu::Colour Gpu::display_pixel(u32 x, u32 y) const
 {
     if (x >= display_width() || y >= display_height()) {
         return {};
     }
 
+    // GP1(07h) says which scanlines of the frame the picture is put
+    // on, and it is as tall as they are many. Asking for fewer than
+    // the frame holds leaves the rest of it black rather than reading
+    // further down VRAM: the BIOS asks for 239 of them, which is 478
+    // of the 480 lines its logo screen occupies, and taking the other
+    // two out of VRAM found the font stored under the picture and drew
+    // it along the bottom as a row of coloured dashes. A game shaking
+    // the screen moves this range rather than what it drew, so where
+    // the picture starts matters as much as how tall it is.
+    const s32 first = static_cast<s32>(first_scanline());
+    const s32 range_start = static_cast<s32>(display_range_y & 0x3FF);
+    const s32 range_end = static_cast<s32>((display_range_y >> 10) & 0x3FF);
+
+    // A scanline is one line of the picture, or two of them where the
+    // two fields are shown at once.
+    const s32 lines_each = display_height() > 240 ? 2 : 1;
+    const s32 top = (range_start - first) * lines_each;
+    const s32 height = (range_end - range_start) * lines_each;
+
+    // Which line of the picture this line of the frame shows. Above
+    // the picture there is nothing to show, and a picture starting
+    // above the frame has its first lines cut off rather than moved.
+    const s32 line_of_picture = static_cast<s32>(y) - top;
+    if (line_of_picture < 0 || line_of_picture >= height) {
+        return {};
+    }
+
     const u32 start_x = display_start & 0x3FF;
     const u32 start_y = (display_start >> 10) & 0x1FF;
-    const std::size_t line =
-        std::size_t{(start_y + y) % VRAM_HEIGHT} * VRAM_WIDTH;
+    const u32 vram_line = start_y + static_cast<u32>(line_of_picture);
+    const std::size_t line = std::size_t{vram_line % VRAM_HEIGHT} * VRAM_WIDTH;
 
     if (colour_24bit()) {
         // Three bytes to the pixel, laid end to end across the
@@ -222,8 +265,11 @@ void Gpu::reset()
     display_mode = 0;
     allow_texture_disable = false;
     display_start = 0;
-    display_range_x = 0;
-    display_range_y = 0;
+    // A reset leaves the ranges where a full-height picture on an NTSC
+    // set wants them, which is the one part of the display it does not
+    // simply zero.
+    display_range_x = 0x00C00200;  // 200h to 200h+256*10
+    display_range_y = 0x00040010;  // 010h to 010h+240
     dma_direction = DmaDirection::Off;
     display_disabled = true;
     irq = false;

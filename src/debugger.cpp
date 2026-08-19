@@ -206,6 +206,10 @@ std::string format_devices(Console& console)
                        gpu.scanline,
                        gpu.odd_field ? 1 : 0,
                        gpu.in_vblank() ? "yes" : "no");
+    out += std::format("gpu  start {:08X}  rangex {:08X}  rangey {:08X}\n",
+                       gpu.display_start,
+                       gpu.display_range_x,
+                       gpu.display_range_y);
     out += std::format("gpu  mode {}  cmdwords {}  transfer {}x{} done {}\n",
                        static_cast<u32>(gpu.mode),
                        gpu.command_words,
