@@ -176,47 +176,68 @@ u32 Cpu::step()
     load_reg = 0;
     load_value = 0;
 
-    if (interrupt_pending()) {
-        // Taken in place of the instruction, which re-runs on return.
-        raise_exception(Exception::Interrupt);
-    } else if (current_pc % 4 != 0) {
+    if (current_pc % 4 != 0) {
         // A jump to a misaligned address faults on the fetch itself.
         raise_address_error(Exception::AddressLoad, current_pc);
     } else {
         const u32 instr = bus.read32(current_pc);
 
-        // The fetch is not billed. There is an instruction cache on
-        // the R3000A and none here, so code running from RAM — which
-        // is nearly all of it — fetches at one cycle on hardware and
-        // would cost seven if this counted it. Charging nothing is the
-        // closer of the two answers until the cache is modelled; the
-        // price is that the BIOS's own uncached run out of ROM, which
-        // nothing times, comes out faster than it really is.
-        bus.stall_cycles = 0;
+        // An interrupt cannot call a GTE command back: by the time one
+        // could be taken the command has already reached the
+        // coprocessor, so hardware runs it and reports epc at the
+        // command all the same, leaving the handler to step over it.
+        // Executing it and raising afterwards gives both halves. Crash
+        // Bandicoot reads the coordinate FIFO expecting exactly that,
+        // and draws a stray polygon for a frame if the command is lost.
+        constexpr u32 GTE_COMMAND = 0x25;  // opcode 0x12, bit 25 set
+        const bool is_gte_command = (instr >> 25) == GTE_COMMAND;
 
-        // Advance both counters before executing, so a branch taken by
-        // this instruction rewrites next_pc while pc — already
-        // pointing at the delay slot — is left alone.
-        pc = next_pc;
-        next_pc += 4;
+        // Asked once, before the command can spend any cycles.
+        const bool interrupt = interrupt_pending();
 
-        execute(instr);
+        if (interrupt && !is_gte_command) {
+            // Taken in place of the instruction, which re-runs on return.
+            raise_exception(Exception::Interrupt);
+        } else {
+            // The fetch is not billed. There is an instruction cache on the
+            // R3000A and none here, so code running from RAM — which is
+            // nearly all of it — fetches at one cycle on hardware and would
+            // cost seven if this counted it. Charging nothing is the closer
+            // of the two answers until the cache is modelled; the price is
+            // that the BIOS's own uncached run out of ROM, which nothing
+            // times, comes out faster than it really is.
+            bus.stall_cycles = 0;
 
-        // A load whose delay slot holds another load to the same
-        // register never reaches it. The register is taken over before
-        // anything can read what the first load brought, so the value
-        // that landed above is put back to what it displaced — the
-        // second load will deliver its own a step later. LWL/LWR are
-        // no exception: they read the landed value while executing and
-        // have already folded it into what they scheduled.
-        if (load_reg != 0 && load_reg == landing_reg) {
-            set_reg(landing_reg, displaced);
-        }
+            // Advance both counters before executing, so a branch taken by
+            // this instruction rewrites next_pc while pc — already pointing
+            // at the delay slot — is left alone.
+            pc = next_pc;
+            next_pc += 4;
 
-        // Recorded after the fact rather than at each of the branches,
-        // which all say where they are going the same way.
-        if (branching) {
-            jump_dest = next_pc;
+            execute(instr);
+
+            // A load whose delay slot holds another load to the same
+            // register never reaches it. The register is taken over before
+            // anything can read what the first load brought, so the value
+            // that landed above is put back to what it displaced — the
+            // second load will deliver its own a step later. LWL/LWR are no
+            // exception: they read the landed value while executing and have
+            // already folded it into what they scheduled.
+            if (load_reg != 0 && load_reg == landing_reg) {
+                set_reg(landing_reg, displaced);
+            }
+
+            // Recorded after the fact rather than at each of the branches,
+            // which all say where they are going the same way.
+            if (branching) {
+                jump_dest = next_pc;
+            }
+
+            if (interrupt) {
+                // epc is the command that just ran, which is what the
+                // handler wants to see to know to return past it.
+                raise_exception(Exception::Interrupt);
+            }
         }
     }
 
