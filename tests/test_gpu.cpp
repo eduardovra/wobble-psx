@@ -342,6 +342,23 @@ TEST_CASE("GP1 resets the GPU and abandons a partial command")
     CHECK((gpu.status() & (1u << 11)) != 0);
 }
 
+TEST_CASE("horizontal blanking is whatever the scanline has left over")
+{
+    Gpu gpu;
+
+    // The window the GPU comes up with is 2560 of the scanline's 3413
+    // cycles, leaving 853 of the GPU's — 542 of the CPU's — blanked.
+    CHECK(gpu.hblank_cycles() == 542);
+
+    // Narrowing the picture lengthens the blank on either side of it.
+    gpu.write_gp1((0x06u << 24) | (0x900u << 12) | 0x300u);
+    CHECK(gpu.hblank_cycles() == 1194);
+
+    // A window wider than the scanline leaves nothing at all.
+    gpu.write_gp1((0x06u << 24) | (0xFFFu << 12));
+    CHECK(gpu.hblank_cycles() == 0);
+}
+
 TEST_CASE("the DMA direction decides what the request bit answers")
 {
     Gpu gpu;

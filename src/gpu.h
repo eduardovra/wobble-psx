@@ -53,6 +53,7 @@ struct Gpu {
     // as everything else rather than from the broadcast standard, and
     // comes out a little under NTSC's nominal 59.94.
     static constexpr u64 CYCLES_PER_SCANLINE = 2172;
+    static constexpr u32 GPU_CYCLES_PER_SCANLINE = 3413;
     static constexpr u32 SCANLINES_PER_FRAME = 263;
     static constexpr u32 VISIBLE_SCANLINES = 240;
 
@@ -120,6 +121,12 @@ struct Gpu {
     // width rises. Timer 0 can be told to count in these rather than
     // in CPU cycles, which is the only reason it is public.
     u32 dot_cycles() const;
+
+    // How long horizontal blanking lasts, in CPU cycles: whatever the
+    // scanline has left once the window GP1(06h) picks has taken its
+    // share. A game that narrows the picture lengthens the blank, and
+    // timer 0 can be told to stop, or to start over, while it lasts.
+    u64 hblank_cycles() const;
 
     struct Colour {
         u8 r = 0;

@@ -101,6 +101,11 @@ constexpr u32 ori(u32 rt, u32 rs, s32 imm) { return i_type(0x0D, rs, rt, imm); }
 
 constexpr u32 lui(u32 rt, s32 imm) { return i_type(0x0F, 0, rt, imm); }
 
+constexpr u32 lb(u32 rt, u32 rs, s32 offset)
+{
+    return i_type(0x20, rs, rt, offset);
+}
+
 constexpr u32 lw(u32 rt, u32 rs, s32 offset)
 {
     return i_type(0x23, rs, rt, offset);

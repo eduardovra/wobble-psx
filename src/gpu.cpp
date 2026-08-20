@@ -1,5 +1,6 @@
 #include "gpu.h"
 
+#include <algorithm>
 #include <cstddef>
 
 #include "savestate.h"
@@ -124,6 +125,19 @@ u32 Gpu::dot_cycles() const
     }
     constexpr std::array<u32, 4> CYCLES = {10, 8, 5, 4};
     return CYCLES[display_mode & 3];
+}
+
+u64 Gpu::hblank_cycles() const
+{
+    // GP1(06h) carries the two edges of the window as positions along
+    // the scanline, measured in the GPU's own cycles. Everything the
+    // scanline has outside them is blanking.
+    const u32 left = display_range_x & 0xFFF;
+    const u32 right = (display_range_x >> 12) & 0xFFF;
+    const u32 window = right > left ? right - left : 0;
+    const u64 active = std::min<u64>(window, GPU_CYCLES_PER_SCANLINE);
+    return (GPU_CYCLES_PER_SCANLINE - active) * CYCLES_PER_SCANLINE /
+        GPU_CYCLES_PER_SCANLINE;
 }
 
 u32 Gpu::display_height() const

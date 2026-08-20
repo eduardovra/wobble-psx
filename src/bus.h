@@ -50,10 +50,11 @@ struct Bus {
     static constexpr u32 SCRATCHPAD_START = 0x1F800000;
     static constexpr u32 SCRATCHPAD_SIZE = 1024;
 
-    // What a load costs, by region, in CPU cycles — hardware
-    // measurements taken from psx-spx's "Load Timing". Each figure
-    // includes the one cycle the instruction takes to issue, so the
-    // stall charged on top of that is the figure minus one.
+    // What a load costs, by region, in CPU cycles — the figures
+    // ps1-tests' cpu/access-time reads back off a console, which is
+    // also what grades any change to them. Each includes the one cycle
+    // the instruction takes to issue, so the stall charged on top of
+    // that is the figure minus one.
     //
     // There is no data cache on the PSX (the SRAM that would be one is
     // the scratchpad), so every load pays the full price and the
@@ -61,9 +62,14 @@ struct Bus {
     // load several times more expensive than an ALU instruction, which
     // is most of the difference between this machine's speed and the
     // one instruction per cycle it used to run at.
-    static constexpr u32 IO_LOAD_CYCLES = 5;     // one shared decoder
-    static constexpr u32 RAM_LOAD_CYCLES = 7;    // plus DRAM refresh
-    static constexpr u32 BIOS_LOAD_CYCLES = 27;  // 8-bit ROM bus
+    static constexpr u32 IO_LOAD_CYCLES = 3;   // one shared decoder
+    static constexpr u32 RAM_LOAD_CYCLES = 5;  // plus DRAM refresh
+
+    // The BIOS is on an 8-bit bus, so its ROM is read one byte at a
+    // time and a load costs by the width it asks for rather than a
+    // flat price: the console reads 7.6, 12.94 and 24.94 cycles for
+    // the three of them.
+    static constexpr u32 BIOS_LOAD_CYCLES_PER_BYTE = 6;
 
     // Reads the whole 512 KB image; false if it is missing or short.
     bool load_bios(const std::string& path);

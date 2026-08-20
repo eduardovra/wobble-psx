@@ -76,10 +76,9 @@ u32 to_physical(u32 addr) { return addr & REGION_MASK[addr >> 29]; }
 // spread over all nine of their branches.
 //
 // Everything unclaimed reads back as zero without a bus access, so it
-// stalls for nothing. The BIOS figure is for a full word: its ROM is
-// on an 8-bit bus, so a byte load is really a quarter of it, which is
-// not worth splitting for a region nothing reads data from in anger.
-u32 load_stall(u32 phys)
+// stalls for nothing. Only the BIOS is charged by the width of the
+// load: the rest of the map answers a byte and a word in the same time.
+u32 load_stall(u32 phys, u32 width)
 {
     if (phys < Bus::RAM_SIZE) {
         return Bus::RAM_LOAD_CYCLES - 1;
@@ -88,7 +87,7 @@ u32 load_stall(u32 phys)
         return Bus::IO_LOAD_CYCLES - 1;
     }
     if (phys >= BIOS_START && phys < BIOS_START + Bus::BIOS_SIZE) {
-        return Bus::BIOS_LOAD_CYCLES - 1;
+        return Bus::BIOS_LOAD_CYCLES_PER_BYTE * width;
     }
     return 0;
 }
@@ -323,7 +322,7 @@ u32 Bus::read32(u32 addr)
         debug->note_access(addr, 4, false);
     }
     const u32 phys = to_physical(addr);
-    stall_cycles += load_stall(phys);
+    stall_cycles += load_stall(phys, 4);
     if (phys < RAM_SIZE) {
         return read_from<u32>(ram, phys);
     }
@@ -353,7 +352,7 @@ u16 Bus::read16(u32 addr)
         debug->note_access(addr, 2, false);
     }
     const u32 phys = to_physical(addr);
-    stall_cycles += load_stall(phys);
+    stall_cycles += load_stall(phys, 2);
     if (phys < RAM_SIZE) {
         return read_from<u16>(ram, phys);
     }
@@ -383,7 +382,7 @@ u8 Bus::read8(u32 addr)
         debug->note_access(addr, 1, false);
     }
     const u32 phys = to_physical(addr);
-    stall_cycles += load_stall(phys);
+    stall_cycles += load_stall(phys, 1);
     if (phys < RAM_SIZE) {
         return ram[phys];
     }

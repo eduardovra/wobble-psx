@@ -25,6 +25,13 @@ struct State;
 // a scanline and gets an interrupt there, and nothing else in the
 // machine can say where the beam is.
 //
+// The mode's bottom three bits point the same two counters at blanking
+// rather than at the picture. Timer 0 can be stopped during horizontal
+// blanking, put back to zero as each one begins, both at once, or held
+// until the first one and then let go; timer 1 does the same against
+// vertical blanking. Timer 2 has no signal to watch, so two of its four
+// settings simply stop it where it stands.
+//
 // A counter is not stepped as time passes. It records the moment it
 // was last correct and works out its value when something asks, so a
 // counter nobody reads costs nothing at all. What that cannot do is
@@ -46,15 +53,20 @@ struct Timers {
         u16 target = 0;
         u16 mode = 0;
 
-        // The instant `value` is correct as of, and the cycles since
-        // then that did not add up to a whole count. Keeping the
-        // remainder is what stops a divided clock losing time.
+        // The instant `value` is correct as of. What has happened
+        // since is worked out from the clocks' own positions rather
+        // than from a remainder carried along, so a divided clock
+        // stays in step with whatever it divides.
         u64 updated = 0;
-        u64 leftover = 0;
 
         // Set once a one-shot interrupt has fired, so it does not fire
         // again until the mode is written.
         bool fired = false;
+
+        // Set once sync mode 3 has seen its blanking interval and let
+        // the counter go. It is the counter that is freed, not the
+        // mode register — software reads back what it wrote.
+        bool released = false;
     };
 
     void reset();
@@ -64,6 +76,10 @@ struct Timers {
     // Brings every counter up to `now`, raising the interrupt of any
     // that passed its target or wrapped on the way.
     void advance(u64 now, const Gpu& gpu, Irq& irq);
+
+    // Clocks one counter the given number of times, which is the part
+    // of a step that does not depend on how long it took.
+    void step(u32 index, u64 counted, Irq& irq);
 
     u32 read_register(u32 phys, u64 now, const Gpu& gpu, Irq& irq);
     void write_register(u32 phys, u32 value, u64 now, const Gpu& gpu, Irq& irq);

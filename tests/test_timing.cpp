@@ -55,16 +55,22 @@ TEST_CASE("a hardware register reads faster than RAM does")
     CHECK(Bus::IO_LOAD_CYCLES < Bus::RAM_LOAD_CYCLES);
 }
 
-// The BIOS ROM is on an 8-bit bus, so a word out of it is four
-// accesses and costs several times what RAM does. No image is loaded
-// here: the price is the region's, not the content's.
-TEST_CASE("a load from the BIOS ROM is the slowest of them")
+// The BIOS ROM is on an 8-bit bus, so it is read a byte at a time and
+// a load is charged by the width it asks for rather than a flat price.
+// No image is loaded here: the price is the region's, not the
+// content's.
+TEST_CASE("a load from the BIOS ROM is the slowest of them, and pays by width")
 {
     Machine machine;
-    machine.load({lui(t0, 0xBFC0), lw(t1, t0, 0)});
+    machine.load({lui(t0, 0xBFC0), lw(t1, t0, 0), lb(t1, t0, 0)});
 
     CHECK(machine.cpu.step() == 1);
-    CHECK(machine.cpu.step() == Bus::BIOS_LOAD_CYCLES);
+
+    const u32 word = machine.cpu.step();
+    const u32 byte = machine.cpu.step();
+    CHECK(word == 1 + Bus::BIOS_LOAD_CYCLES_PER_BYTE * 4);
+    CHECK(byte == 1 + Bus::BIOS_LOAD_CYCLES_PER_BYTE);
+    CHECK(word > Bus::RAM_LOAD_CYCLES);
 }
 
 // Stores go to the write queue and the CPU carries on without waiting,
