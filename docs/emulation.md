@@ -32,6 +32,14 @@ Crash Bandicoot  603 MB    2.8 s to unpack
 Crash is the awkward case and cannot be helped: its disc is a single
 Mode 2 track, so the whole of it is the part that gets read.
 
+The drive has a lid. Opening it stops the disc and sends the interrupt
+nothing asked for, and the status byte says the lid is — or has been —
+open until a Getstat reads it away, which is how a two-disc game knows
+it has been handed something else. Dropping an image on the window does
+the whole gesture; `lid open`/`lid close` in the debugger do it a step
+at a time, and `cdrom/disc-swap` from ps1-tests is what it is measured
+against.
+
 BIN/CUE is the format underneath, since that is what a PlayStation disc
 actually is — 2352-byte sectors with their own sync and header, and any
 Redbook audio in tracks of its own. A bare `.iso` of 2048-byte blocks

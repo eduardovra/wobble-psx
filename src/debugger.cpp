@@ -171,12 +171,13 @@ std::string format_devices(Console& console)
 
     std::string out;
     out += std::format("cdrom  stat {:02X}  int {:X}  enable {:02X}  "
-                       "queued {}  busy {}\n",
+                       "queued {}  busy {}  lid {}\n",
                        cdrom.status,
                        cdrom.interrupt_flag,
                        cdrom.interrupt_enable,
                        cdrom.queued,
-                       cdrom.busy ? "yes" : "no");
+                       cdrom.busy ? "yes" : "no",
+                       cdrom.shell_open ? "open" : "shut");
     out += std::format("pad  buttons {:04X}\n", console.bus.sio.buttons);
     for (u32 i = 0; i < Timers::COUNT; i++) {
         const Timers::Timer& timer = console.bus.timers.timers[i];
@@ -285,6 +286,8 @@ constexpr const char* HELP =
     "tracing <on|off>   record the instruction trace\n"
     "profile <n> [top]  run n instructions, then the busiest addresses\n"
     "disc <file>        put a disc in the drive (.zip, .cue, .bin)\n"
+    "lid <open|close>   open the drive lid, or shut it; a game is only\n"
+    "                   given a second disc between the two\n"
     "exe <file>         boot the BIOS, then run a PS-EXE on it\n"
     "screen <file>      write what the display shows, as a PPM\n"
     "vram <file>        write the whole of VRAM, as a PPM\n"
@@ -862,6 +865,23 @@ std::string Debugger::execute(Console& console, const std::string& line)
         const Disc& disc = console.bus.cdrom.disc;
         return std::format(
             "{} tracks, {} sectors\n", disc.tracks.size(), disc.sector_count());
+    }
+
+    if (command == "lid") {
+        // A swap is three commands: the lid up, a different disc, the
+        // lid down. Loading one without lifting the lid changes the
+        // medium under a drive that is still reading it, which is not
+        // something a console can do.
+        CdRom& cdrom = console.bus.cdrom;
+        if (words.size() > 1 && words[1] == "open") {
+            cdrom.open_shell();
+            return "the lid is open\n";
+        }
+        if (words.size() > 1 && words[1] == "close") {
+            cdrom.close_shell();
+            return "the lid is closed\n";
+        }
+        return "lid needs open or close\n";
     }
 
     if (command == "exe") {

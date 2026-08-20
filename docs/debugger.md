@@ -20,12 +20,17 @@ what it is — so a game can be booted with no display attached:
     -c "frames #650" -c "screen logo.ppm"
 ```
 
-The `disc` command puts one in a machine that is already running.
+The `disc` command puts one in a machine that is already running. A
+game that asks for its second disc wants the whole gesture and not
+just the new medium, so a swap is three commands: `lid open`, the
+`disc`, and `lid close`. Between the two the drive reaches nothing,
+which is the state the swap has to happen in.
 
 `--help` describes the command line; `help`, once inside, lists the
 commands. Briefly: `run`/`runc`/`frames`/`until` move the machine,
 `break` and `watch` stop it, `regs`/`mem`/`disas`/`dev` look at it,
-`pad` holds a controller button down, `trace` shows the last
+`pad` holds a controller button down, `lid` opens and shuts the drive,
+`trace` shows the last
 instructions retired, `profile` reports where the time and the memory
 accesses went, `screen` writes what the display is showing as a PPM,
 `audio` writes what the SPU has played as a WAV, `exe` loads a PS-EXE,

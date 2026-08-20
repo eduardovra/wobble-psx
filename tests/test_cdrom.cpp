@@ -426,3 +426,90 @@ TEST_CASE("a movie's sound never reaches the software reading its picture")
 
     CHECK(delivered == std::vector<u8>{8, 10, 12});
 }
+
+TEST_CASE("opening the lid stops the drive, and it says so unasked")
+{
+    const Image image(64);
+    const Drive drive;
+    REQUIRE(drive.console->bus.cdrom.disc.load(image.path));
+
+    drive.console->bus.cdrom.open_shell();
+    drive.advance(LONG_ENOUGH);
+
+    // An answer to nothing: the drive has stopped, and why.
+    CHECK(drive.pending() == 5);
+    CHECK(drive.answer() == std::vector<u8>{0x01, 0x08});
+    drive.acknowledge();
+
+    // The disc is still turning for a moment after the lid goes.
+    drive.command(0x01);  // GetStat
+    drive.advance(LONG_ENOUGH);
+    CHECK(drive.answer() == std::vector<u8>{0x12});
+    drive.acknowledge();
+
+    drive.advance(CPU_CLOCK_HZ);
+    drive.command(0x01);
+    drive.advance(LONG_ENOUGH);
+    CHECK(drive.answer() == std::vector<u8>{0x10});
+}
+
+TEST_CASE("the lid's bit stands after it is shut, until a Getstat takes it")
+{
+    const Image image(64);
+    const Drive drive;
+    REQUIRE(drive.console->bus.cdrom.disc.load(image.path));
+
+    drive.console->bus.cdrom.open_shell();
+    drive.advance(LONG_ENOUGH);
+    drive.acknowledge();
+    drive.console->bus.cdrom.close_shell();
+
+    // A game that was not watching when the lid moved still finds out
+    // that it did, and only the asking puts the bit down.
+    drive.command(0x01);  // GetStat
+    drive.advance(LONG_ENOUGH);
+    CHECK(drive.answer() == std::vector<u8>{0x10});
+    drive.acknowledge();
+
+    drive.command(0x01);
+    drive.advance(LONG_ENOUGH);
+    CHECK(drive.answer() == std::vector<u8>{0x00});
+}
+
+TEST_CASE("a disc changed while the lid is open is the one read after it")
+{
+    // Two discs of different lengths, which is the cheapest thing to
+    // ask the drive that only the medium can answer.
+    const Image first(64);
+    const Image second(200);
+    const Drive drive;
+    REQUIRE(drive.console->bus.cdrom.disc.load(first.path));
+
+    drive.command(0x14, {0x00});  // GetTD of the lead-out: how long it is
+    drive.advance(LONG_ENOUGH);
+    CHECK(drive.answer() == std::vector<u8>{0x02, 0x00, 0x02});
+    drive.acknowledge();
+
+    drive.console->bus.cdrom.open_shell();
+    drive.advance(LONG_ENOUGH);
+    REQUIRE(drive.pending() == 5);
+    drive.acknowledge();
+
+    // A drive standing open reaches nothing, whatever is sitting in it.
+    drive.command(0x1A);  // GetID
+    drive.advance(LONG_ENOUGH);
+    REQUIRE(drive.pending() == 3);
+    drive.answer();
+    drive.acknowledge();
+    drive.advance(LONG_ENOUGH);
+    REQUIRE(drive.pending() == 5);
+    CHECK(drive.answer().at(1) == 0x40);  // no disc
+    drive.acknowledge();
+
+    REQUIRE(drive.console->bus.cdrom.disc.load(second.path));
+    drive.console->bus.cdrom.close_shell();
+
+    drive.command(0x14, {0x00});
+    drive.advance(LONG_ENOUGH);
+    CHECK(drive.answer() == std::vector<u8>{0x10, 0x00, 0x04});
+}

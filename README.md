@@ -77,6 +77,11 @@ is empty, and so is every memory card slot.
 | `Q` `W` `E` `R` | L1, L2, R1, R2 |
 | Enter, right shift | start, select |
 
+Dropping a disc image on the window swaps it in. The drive lid opens,
+the disc changes, and the lid shuts a second later — which is what a
+two-disc game is waiting to see. In `wobble-dbg` the same swap is
+`lid open`, `disc <file>`, `lid close`.
+
 ## Documentation
 
 - [What is emulated](docs/emulation.md) — discs and disc formats, the

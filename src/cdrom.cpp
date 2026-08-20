@@ -36,9 +36,23 @@ enum Command : u8 {
 
 // The second byte of an INT5, saying why the command failed.
 constexpr u8 ERROR_SEEK_FAILED = 0x04;
+constexpr u8 ERROR_SHELL_OPEN = 0x08;
 constexpr u8 ERROR_INVALID_COMMAND = 0x40;
 constexpr u8 ERROR_NO_DISC = 0x40;
 constexpr u8 ERROR_NOT_READY = 0x80;
+
+// What the drive says when the lid goes: an INT5 nothing asked for,
+// carrying an error bit and the reason for it. The status byte in it
+// is not the one the drive goes on to report — the console sends 01h
+// while its Getstat still says the disc is turning and the lid is off
+// it. The answer describes the drive stopping rather than the drive
+// as it stands.
+constexpr u8 SHELL_OPEN_ANSWER = 0x01;
+
+// How long the disc takes to stop turning once the lid is opened.
+// About a second: long enough that software polling the status sees
+// the motor bit go down a moment after the lid bit goes up.
+constexpr u64 SPIN_DOWN_CYCLES = CPU_CLOCK_HZ;
 
 // What a sector says about itself when there is no sector: the mode a
 // data disc is written in, and the subheader bit that marks the
@@ -150,7 +164,9 @@ constexpr std::array<u8, 4> REGION = {'S', 'C', 'E', 'A'};
 void CdRom::reset()
 {
     index = 0;
-    status = STATUS_MOTOR;
+    // The lid is not something a power cycle closes, so a machine
+    // reset while it stands open still reports it open.
+    status = shell_open ? STATUS_SHELL_OPEN : STATUS_MOTOR;
     mode = 0;
     parameters = {};
     parameter_count = 0;
@@ -169,6 +185,8 @@ void CdRom::reset()
     reading = false;
     seeking = false;
     header_valid = false;
+    shell_report_pending = false;
+    spin_down_remaining = 0;
     sector_remaining = 0;
     sector = {};
     data_cursor = 0;
@@ -197,6 +215,12 @@ void CdRom::visit_state(State& state)
     state(reading);
     state(seeking);
     state(header_valid);
+    // The lid itself is left out for the same reason the disc is: it
+    // is the drive someone is sitting at, not state the machine holds.
+    // What the controller made of it — the bit in the status byte, the
+    // answer it still owes, the motor winding down — is state.
+    state(shell_report_pending);
+    state(spin_down_remaining);
     state(sector_remaining);
     state(sector);
     state(data_cursor);
@@ -384,6 +408,49 @@ void CdRom::load_header()
     header_valid = true;
 }
 
+void CdRom::set_status(u8 bits)
+{
+    // Everything a command has to say about the drive is said by
+    // replacing the status byte, and none of it has any bearing on the
+    // lid: that bit is where the drive is rather than what it is
+    // doing, and only Getstat takes it away.
+    status = static_cast<u8>((status & STATUS_SHELL_OPEN) | bits);
+}
+
+void CdRom::open_shell()
+{
+    if (shell_open) {
+        return;
+    }
+    shell_open = true;
+
+    // Whatever the drive was doing it is not doing now, and it no
+    // longer knows where its head is: the disc that comes back may not
+    // be the one that went away.
+    reading = false;
+    seeking = false;
+    header_valid = false;
+    data_cursor = 0;
+    data_end = 0;
+
+    // The disc is still turning for a moment yet, and the status byte
+    // says so until it has wound down.
+    status = STATUS_MOTOR | STATUS_SHELL_OPEN;
+    spin_down_remaining = SPIN_DOWN_CYCLES;
+    shell_report_pending = true;
+}
+
+void CdRom::close_shell()
+{
+    // Closing the lid only makes the drive usable again. Nothing spins
+    // up until something asks it to, and the bit stays up until a
+    // Getstat reads it: a game that was not watching when the lid
+    // moved still finds out that it did.
+    shell_open = false;
+    spin_down_remaining = 0;
+    status = STATUS_SHELL_OPEN;
+}
+
 void CdRom::lose_position()
 {
     // What a drive that cannot find a header does: it gives up on the
@@ -393,11 +460,28 @@ void CdRom::lose_position()
     reading = false;
     seeking = false;
     header_valid = false;
-    status = STATUS_SEEK_ERROR;
+    set_status(STATUS_SEEK_ERROR);
 }
 
 bool CdRom::tick(u64 cycles)
 {
+    if (spin_down_remaining > 0) {
+        if (spin_down_remaining <= cycles) {
+            spin_down_remaining = 0;
+            status = static_cast<u8>(status & ~STATUS_MOTOR);
+        } else {
+            spin_down_remaining -= cycles;
+        }
+    }
+
+    // The lid's own answer waits for room in the queue rather than
+    // being dropped, the same as a sector does. Software that was
+    // between commands when the lid moved must still be told.
+    if (shell_report_pending && queued < QUEUE_CAPACITY) {
+        shell_report_pending = false;
+        answer(INT_ERROR, {SHELL_OPEN_ANSWER, ERROR_SHELL_OPEN}, 0);
+    }
+
     advance_read(cycles);
 
     if (queued == 0) {
@@ -428,6 +512,17 @@ void CdRom::execute(u8 command)
 
     switch (command) {
     case GET_STAT:
+        // The one command that puts the lid's bit down, which is what
+        // makes "is or was open" worth reporting: a game learns that
+        // the disc may have been changed under it, and says it has
+        // noticed by asking. A lid still open cannot be acknowledged
+        // away, so the bit only goes once it is shut.
+        answer(INT_ACKNOWLEDGE, {status}, ACKNOWLEDGE_CYCLES);
+        if (!shell_open) {
+            status = static_cast<u8>(status & ~STATUS_SHELL_OPEN);
+        }
+        break;
+
     case MUTE:
     case DEMUTE:
         answer(INT_ACKNOWLEDGE, {status}, ACKNOWLEDGE_CYCLES);
@@ -532,7 +627,7 @@ void CdRom::execute(u8 command)
         mode = 0;
         reading = false;
         seeking = false;
-        status = STATUS_MOTOR;
+        set_status(STATUS_MOTOR);
         answer(INT_ACKNOWLEDGE, {status}, ACKNOWLEDGE_CYCLES);
         answer(INT_COMPLETE, {status}, INIT_CYCLES);
         break;

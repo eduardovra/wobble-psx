@@ -13,6 +13,7 @@
 #include <imgui_impl_sdl3.h>
 #include <imgui_impl_sdlrenderer3.h>
 
+#include "cdrom.h"
 #include "console.h"
 #include "disasm.h"
 #include "exe.h"
@@ -69,6 +70,24 @@ void handle_pad_key(Sio& sio, const SDL_Event& event)
         return;
     }
 }
+
+// Puts a disc in the drive the way a person does: the lid up first,
+// so a game waiting for its second disc sees the drive open, the
+// medium changed while nothing can reach it, and the lid down again
+// after a moment. Dropping a file on the window is the whole gesture,
+// and this is the half of it that cannot wait.
+void open_lid_for(Console& console, const char* path)
+{
+    console.bus.cdrom.open_shell();
+    if (!console.bus.cdrom.disc.load(path)) {
+        SDL_Log("failed to load the disc from %s", path);
+    }
+}
+
+// How long the lid is left standing open afterwards. A game polls the
+// drive to find out that it was opened at all, so shutting it in the
+// same instant would be a swap nothing had the chance to notice.
+constexpr u32 LID_OPEN_FRAMES = 60;
 
 // Emulated time to run per host frame. The renderer is vsynced to
 // 60 Hz, so running one sixtieth of a second of console time per pass
@@ -369,6 +388,10 @@ Controls (the keyboard is the pad in the first socket):
   Q  W  E  R        L1, L2, R1, R2
   Enter  RShift     start, select
 
+Dropping a disc image on the window swaps it in: the lid opens, the
+disc changes, and the lid shuts a second later, which is what a
+two-disc game is waiting to see.
+
 Examples:
   wobble SCPH1001.BIN
   wobble SCPH1001.BIN "Ridge Racer (USA).zip"
@@ -478,6 +501,7 @@ int main(int argc, char** argv)
     bool was_halted = false;
     size_t tty_logged_upto = 0;
     bool running = true;
+    u32 lid_open_frames = 0;
     while (running) {
         SDL_Event event;
         while (SDL_PollEvent(&event)) {
@@ -485,7 +509,18 @@ int main(int argc, char** argv)
             if (event.type == SDL_EVENT_QUIT) {
                 running = false;
             }
+            if (event.type == SDL_EVENT_DROP_FILE) {
+                open_lid_for(console, event.drop.data);
+                lid_open_frames = LID_OPEN_FRAMES;
+            }
             handle_pad_key(console.bus.sio, event);
+        }
+
+        if (lid_open_frames > 0) {
+            lid_open_frames--;
+            if (lid_open_frames == 0) {
+                console.bus.cdrom.close_shell();
+            }
         }
 
         if (emu_running) {

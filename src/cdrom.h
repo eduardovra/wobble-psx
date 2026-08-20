@@ -30,6 +30,12 @@ struct State;
 // here: GetID answers INT5 with the "no disc" reason, and it is that
 // answer which sends the BIOS to its shell instead of into a game.
 //
+// So is an open one. The lid is a switch the drive watches: lifting it
+// stops the disc and sends an INT5 nothing asked for, and the status
+// byte carries a bit saying the lid is, or has been, open until a
+// Getstat reads it away. That bit is how a two-disc game knows it has
+// been given something else to read.
+//
 // With a disc in it the drive also reads. A read is not a command that
 // answers once: ReadN acknowledges, and then a sector arrives as an
 // INT1 every time one passes under the head — 75 a second, or 150 at
@@ -97,6 +103,7 @@ struct CdRom {
     static constexpr u8 STATUS_MOTOR = 1 << 1;
     static constexpr u8 STATUS_SEEK_ERROR = 1 << 2;
     static constexpr u8 STATUS_ID_ERROR = 1 << 3;
+    static constexpr u8 STATUS_SHELL_OPEN = 1 << 4;
     static constexpr u8 STATUS_READING = 1 << 5;
     static constexpr u8 STATUS_SEEKING = 1 << 6;
     u8 status = STATUS_MOTOR;
@@ -166,9 +173,31 @@ struct CdRom {
     u32 data_cursor = 0;
     u32 data_end = 0;
 
-    // Whether the drive has a disc that reads. Everything that would
-    // touch the medium refuses when it does not.
-    bool has_disc() const { return disc.loaded(); }
+    // Whether the lid is open. A drive standing open reaches nothing,
+    // whatever is sitting in it — which is also how a disc comes to be
+    // swapped, since the only moment a game may be given a different
+    // one is while the drive cannot see either.
+    bool shell_open = false;
+
+    // An INT5 the lid owes software and has not been able to give yet,
+    // because an answer to something else was still in the queue.
+    bool shell_report_pending = false;
+
+    // Cycles left before the disc has stopped turning. A motor is not
+    // a switch: the lid opens, and for a moment afterwards the status
+    // byte still says the disc is spinning, because it is.
+    u64 spin_down_remaining = 0;
+
+    // Opens the lid, or closes it. Opening stops the drive where it
+    // stands and tells software so; closing only lets it be used
+    // again, and leaves the disc stopped until something asks for it.
+    void open_shell();
+    void close_shell();
+
+    // Whether the drive has a disc it can read. Everything that would
+    // touch the medium refuses when it does not — and an open lid is
+    // one of the ways it does not.
+    bool has_disc() const { return disc.loaded() && !shell_open; }
 
     // Whether a sector is one the sound hardware takes rather than
     // software: compressed audio, on the stream the filter names.
@@ -205,6 +234,11 @@ private:
     // Reads the header of the sector the head has arrived at, which
     // is what a seek does last and what Getloc answers from.
     void load_header();
+
+    // Replaces what the drive is doing without disturbing what the
+    // lid is: the shell bit is kept whatever a command sets the rest
+    // of the status byte to.
+    void set_status(u8 bits);
 
     // Gives up on where the head is: the state a drive is left in by
     // a seek that found nothing to read.
