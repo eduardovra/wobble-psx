@@ -46,6 +46,10 @@ constexpr u32 EXPANSION1_END = 0x1F080000;
 // here, so the bus floats and every read comes back all ones.
 constexpr u32 EXPANSION2_START = 0x1F802000;
 constexpr u32 EXPANSION2_END = 0x1F803000;
+// Expansion region 3: the multitap and boot-ROM port. Empty here too,
+// and on every retail machine.
+constexpr u32 EXPANSION3_START = 0x1FA00000;
+constexpr u32 EXPANSION3_END = 0x1FC00000;
 // Sits in KSEG2 and so is matched on the virtual address, unmasked.
 constexpr u32 CACHE_CONTROL = 0xFFFE0130;
 
@@ -65,32 +69,23 @@ bool in_expansion2(u32 phys)
     return phys >= EXPANSION2_START && phys < EXPANSION2_END;
 }
 
+bool in_expansion3(u32 phys)
+{
+    return phys >= EXPANSION3_START && phys < EXPANSION3_END;
+}
+
+// All three expansion windows are empty on a retail machine, and an
+// empty window is not silence: nothing drives the data lines, so they
+// stay at the pull-ups and a read comes back all ones.
+bool in_expansion(u32 phys)
+{
+    return in_expansion1(phys) || in_expansion2(phys) || in_expansion3(phys);
+}
+
 // Shifting an address right by 29 leaves its top 3 bits: the region
 // index. Since this emulator has no caches, translating to a physical
 // address is all the region distinction amounts to here.
 u32 to_physical(u32 addr) { return addr & REGION_MASK[addr >> 29]; }
-
-// How long a load from this address stalls the CPU, beyond the one
-// cycle the instruction costs anyway. Repeating the range checks the
-// read paths make is a few comparisons against keeping the timing
-// spread over all nine of their branches.
-//
-// Everything unclaimed reads back as zero without a bus access, so it
-// stalls for nothing. Only the BIOS is charged by the width of the
-// load: the rest of the map answers a byte and a word in the same time.
-u32 load_stall(u32 phys, u32 width)
-{
-    if (phys < Bus::RAM_SIZE) {
-        return Bus::RAM_LOAD_CYCLES - 1;
-    }
-    if (phys >= IO_START && phys < IO_END) {
-        return Bus::IO_LOAD_CYCLES - 1;
-    }
-    if (phys >= BIOS_START && phys < BIOS_START + Bus::BIOS_SIZE) {
-        return Bus::BIOS_LOAD_CYCLES_PER_BYTE * width;
-    }
-    return 0;
-}
 
 // Memory is kept as raw bytes, so multi-byte accesses go through
 // memcpy rather than a reinterpreted pointer, which would break
@@ -129,6 +124,7 @@ void Bus::visit_state(State& state)
     spu.visit_state(state);
     timers.visit_state(state);
     mdec.visit_state(state);
+    memctrl.visit_state(state);
 }
 
 bool Bus::read_io(u32 phys, u32& value, u32 width)
@@ -184,6 +180,10 @@ bool Bus::read_io(u32 phys, u32& value, u32 width)
     }
     if (phys >= Mdec::BASE && phys < Mdec::END) {
         value = mdec.read_register(phys);
+        return true;
+    }
+    if (phys >= MemControl::BASE && phys < MemControl::END) {
+        value = memctrl.read_register(phys);
         return true;
     }
     return false;
@@ -261,6 +261,10 @@ bool Bus::write_io(u32 phys, u32 value, u32 width)
     }
     if (phys >= Mdec::BASE && phys < Mdec::END) {
         mdec.write_register(phys, value);
+        return true;
+    }
+    if (phys >= MemControl::BASE && phys < MemControl::END) {
+        memctrl.write_register(phys, value);
         return true;
     }
     return false;
@@ -365,13 +369,74 @@ bool Bus::load_bios(const std::string& path)
     return std::cmp_equal(file.gcount(), bios.size());
 }
 
-u32 Bus::read32(u32 addr)
+// How long a load from this address stalls the CPU, beyond the one
+// cycle the instruction costs anyway. Repeating the range checks the
+// read paths make is a few comparisons against keeping the timing
+// spread over all nine of their branches.
+//
+// The six devices on the far side of a chip select are timed by what
+// the memory-control registers say they cost, which is where the width
+// of the load starts to matter: a byte and a word from RAM cost the
+// same, but a word from the CD-ROM is four accesses to an eight-bit
+// device and costs four times what a byte does. Everything unclaimed
+// reads back as zero without a bus access, so it stalls for nothing.
+u32 Bus::load_stall(u32 phys, u32 bytes) const
+{
+    if (phys < RAM_SIZE) {
+        return RAM_LOAD_CYCLES - 1;
+    }
+    if (phys >= IO_START && phys < IO_END) {
+        // The CD-ROM and the SPU sit inside the register range but not
+        // on the bus the rest of it is on: they are separate chips
+        // with their own chip selects, and cost several times what a
+        // register on the main bus does.
+        if (phys >= CdRom::BASE && phys < CdRom::END) {
+            return memctrl.access_cycles(MemControl::Device::CdRom, bytes) - 1;
+        }
+        if (phys >= Spu::BASE && phys < Spu::END) {
+            return memctrl.access_cycles(MemControl::Device::Spu, bytes) - 1;
+        }
+        return IO_LOAD_CYCLES - 1;
+    }
+    if (phys >= BIOS_START && phys < BIOS_START + BIOS_SIZE) {
+        return memctrl.access_cycles(MemControl::Device::Bios, bytes) - 1;
+    }
+    if (in_expansion1(phys)) {
+        return memctrl.access_cycles(MemControl::Device::Expansion1, bytes) - 1;
+    }
+    if (in_expansion2(phys)) {
+        return memctrl.access_cycles(MemControl::Device::Expansion2, bytes) - 1;
+    }
+    if (in_expansion3(phys)) {
+        return memctrl.access_cycles(MemControl::Device::Expansion3, bytes) - 1;
+    }
+    // The cache control register is not on the bus at all — it is
+    // inside the CPU — and answers in one cycle for a byte and two for
+    // anything wider.
+    if (phys == CACHE_CONTROL) {
+        return bytes > 1 ? 1 : 0;
+    }
+    return 0;
+}
+
+u32 Bus::read32(u32 addr) { return read_word(addr, 4); }
+
+// LWL and LWR each read the aligned word around their address and keep
+// one end of it: two, three or four of its bytes, and between them
+// exactly the four of the unaligned word they were written to move. So
+// each is billed for the bytes it keeps rather than for a whole word,
+// which on a narrow device is most of the price — the pair that reads
+// an unaligned word out of the SPU costs what one aligned word costs,
+// not twice that.
+u32 Bus::read32_partial(u32 addr, u32 bytes) { return read_word(addr, bytes); }
+
+u32 Bus::read_word(u32 addr, u32 billed_bytes)
 {
     if (debug != nullptr) {
         debug->note_access(addr, 4, false);
     }
     const u32 phys = to_physical(addr);
-    stall_cycles += load_stall(phys, 4);
+    stall_cycles += load_stall(phys, billed_bytes);
     if (phys < RAM_SIZE) {
         return read_from<u32>(ram, phys);
     }
@@ -387,7 +452,7 @@ u32 Bus::read32(u32 addr)
         note_poll(phys, value);
         return value;
     }
-    if (in_expansion2(phys)) {
+    if (in_expansion(phys)) {
         return 0xFFFFFFFF;  // nothing on the port: the lines float high
     }
     if (note_unhandled(addr)) {
@@ -418,7 +483,7 @@ u16 Bus::read16(u32 addr)
         note_poll(phys, value);
         return static_cast<u16>(value);
     }
-    if (in_expansion2(phys)) {
+    if (in_expansion(phys)) {
         return 0xFFFF;  // nothing on the port: the lines float high
     }
     if (note_unhandled(addr)) {
@@ -449,11 +514,8 @@ u8 Bus::read8(u32 addr)
         note_poll(phys, value);
         return static_cast<u8>(value);
     }
-    if (in_expansion2(phys)) {
+    if (in_expansion(phys)) {
         return 0xFF;  // nothing on the port: the lines float high
-    }
-    if (in_expansion1(phys)) {
-        return 0xFF;  // no expansion device present
     }
     if (note_unhandled(addr)) {
         log_message(std::format("bus: unhandled read8 at {:08X}", addr));

@@ -539,7 +539,7 @@ void Cpu::execute(u32 instr)
     // so none of the four can fault on alignment.
     case 0x22: {  // LWL
         const u32 addr = reg(rs(instr)) + imm_se(instr);
-        const u32 word = bus.read32(addr & ~3u);
+        const u32 word = bus.read32_partial(addr & ~3u, (addr & 3) + 1);
         const u32 shift = 24 - (addr & 3) * 8;
         const u32 kept = pending_reg(rt(instr)) & ~(ALL_ONES << shift);
         schedule_load(rt(instr), kept | (word << shift));
@@ -570,7 +570,7 @@ void Cpu::execute(u32 instr)
     }
     case 0x26: {  // LWR — the other half of the pair described above
         const u32 addr = reg(rs(instr)) + imm_se(instr);
-        const u32 word = bus.read32(addr & ~3u);
+        const u32 word = bus.read32_partial(addr & ~3u, 4 - (addr & 3));
         const u32 shift = (addr & 3) * 8;
         const u32 kept = pending_reg(rt(instr)) & ~(ALL_ONES >> shift);
         schedule_load(rt(instr), kept | (word >> shift));

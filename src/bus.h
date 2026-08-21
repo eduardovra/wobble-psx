@@ -10,6 +10,7 @@
 #include "gpu.h"
 #include "irq.h"
 #include "mdec.h"
+#include "memctrl.h"
 #include "scheduler.h"
 #include "sio.h"
 #include "spu.h"
@@ -65,11 +66,10 @@ struct Bus {
     static constexpr u32 IO_LOAD_CYCLES = 3;   // one shared decoder
     static constexpr u32 RAM_LOAD_CYCLES = 5;  // plus DRAM refresh
 
-    // The BIOS is on an 8-bit bus, so its ROM is read one byte at a
-    // time and a load costs by the width it asks for rather than a
-    // flat price: the console reads 7.6, 12.94 and 24.94 cycles for
-    // the three of them.
-    static constexpr u32 BIOS_LOAD_CYCLES_PER_BYTE = 6;
+    // The BIOS, the CD-ROM, the SPU and the three expansion windows
+    // are not here: what they cost is worked out from the
+    // memory-control registers, which say how long each of them holds
+    // the bus for and how wide its data lines are. See memctrl.h.
 
     // Reads the whole 512 KB image; false if it is missing or short.
     bool load_bios(const std::string& path);
@@ -94,6 +94,10 @@ struct Bus {
     u8 read8(u32 addr);
     u16 read16(u32 addr);
     u32 read32(u32 addr);
+
+    // The same word back as read32, billed for `bytes` of it: what an
+    // unaligned load's two halves each read.
+    u32 read32_partial(u32 addr, u32 bytes);
     void write8(u32 addr, u32 value);
     void write16(u32 addr, u32 value);
     void write32(u32 addr, u32 value);
@@ -131,6 +135,12 @@ struct Bus {
     // voice is written both halves at once.
     bool read_io(u32 phys, u32& value, u32 width);
     bool write_io(u32 phys, u32 value, u32 width);
+
+    u32 read_word(u32 addr, u32 billed_bytes);
+
+    // How long a load of `bytes` bytes from `phys` stalls the CPU,
+    // over and above the one cycle the instruction itself costs.
+    u32 load_stall(u32 phys, u32 bytes) const;
 
     // Cycles the accesses made so far have stalled the CPU for, over
     // and above the one cycle the instruction itself costs. The CPU
@@ -176,6 +186,7 @@ struct Bus {
     Spu spu;
     Timers timers;
     Mdec mdec;
+    MemControl memctrl;
 
     // Bounded by the number of distinct unhandled addresses a game
     // actually touches, which is small.

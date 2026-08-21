@@ -57,20 +57,57 @@ TEST_CASE("a hardware register reads faster than RAM does")
 
 // The BIOS ROM is on an 8-bit bus, so it is read a byte at a time and
 // a load is charged by the width it asks for rather than a flat price.
-// No image is loaded here: the price is the region's, not the
-// content's.
-TEST_CASE("a load from the BIOS ROM is the slowest of them, and pays by width")
+// The figures are ps1-tests' cpu/access-time off a console: 7.6, 12.94
+// and 24.94 cycles for the three widths. No image is loaded here: the
+// price is the region's, not the content's.
+TEST_CASE("a load from the BIOS ROM pays by width")
 {
     Machine machine;
-    machine.load({lui(t0, 0xBFC0), lw(t1, t0, 0), lb(t1, t0, 0)});
+    machine.load(
+        {lui(t0, 0xBFC0), lw(t1, t0, 0), lh(t1, t0, 0), lb(t1, t0, 0)});
 
     CHECK(machine.cpu.step() == 1);
 
-    const u32 word = machine.cpu.step();
-    const u32 byte = machine.cpu.step();
-    CHECK(word == 1 + Bus::BIOS_LOAD_CYCLES_PER_BYTE * 4);
-    CHECK(byte == 1 + Bus::BIOS_LOAD_CYCLES_PER_BYTE);
-    CHECK(word > Bus::RAM_LOAD_CYCLES);
+    CHECK(machine.cpu.step() == 25);
+    CHECK(machine.cpu.step() == 13);
+    CHECK(machine.cpu.step() == 7);
+}
+
+// The two devices that a game polls hardest are the two slowest things
+// on the bus. Console figures again: the CD-ROM answers a byte in 8
+// cycles, and the SPU takes 18 for a halfword — six times what a
+// register on the main bus costs, which is what makes a polling loop
+// on either of them run at the speed it does.
+TEST_CASE("the CD-ROM and the SPU are the slow devices")
+{
+    Machine machine;
+    machine.load({lui(t0, 0x1F80),
+                  lb(t1, t0, 0x1800),
+                  lw(t1, t0, 0x1800),
+                  lh(t1, t0, 0x1DAA),
+                  lw(t1, t0, 0x1DA8)});
+
+    CHECK(machine.cpu.step() == 1);
+
+    CHECK(machine.cpu.step() == 8);
+    CHECK(machine.cpu.step() == 26);
+    CHECK(machine.cpu.step() == 18);
+    CHECK(machine.cpu.step() == 39);
+}
+
+// The costs are not constants: they come out of the memory-control
+// registers, and software may write them. A game that tells the CD-ROM
+// it may answer in a single cycle is charged for a single cycle.
+TEST_CASE("what a device costs follows the memory-control registers")
+{
+    Machine machine;
+    constexpr u32 CDROM_DELAY = 0x1F801018;
+
+    machine.bus->write32(CDROM_DELAY, 0x00020800);  // no delay at all
+    machine.load({lui(t0, 0x1F80), lb(t1, t0, 0x1800)});
+
+    CHECK(machine.cpu.step() == 1);
+    CHECK(machine.cpu.step() == 4);
 }
 
 // Stores go to the write queue and the CPU carries on without waiting,

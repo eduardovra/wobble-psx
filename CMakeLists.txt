@@ -90,6 +90,7 @@ add_library(core STATIC
     src/irq.cpp
     src/log.cpp
     src/mdec.cpp
+    src/memctrl.cpp
     src/raster.cpp
     src/savestate.cpp
     src/scheduler.cpp
