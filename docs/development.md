@@ -40,6 +40,30 @@ the hardware test programs are for. The debugger's `exe` command runs
 them; making them pass is tracked in
 [issue #1](https://github.com/eduardovra/wobble-psx/issues/1).
 
+## When a program stops getting anywhere
+
+What the machine notices goes to standard error — a register no device
+answers for, a disc that would not open — and one of those reports is
+about the program rather than the emulator:
+
+```
+bus: 1F801814 read 500000 times in a second, answering 8C02220A — the
+guest is waiting for something that is not coming
+```
+
+Software here waits by reading a register until a bit changes, so a
+register read half a million times inside a second of console time is a
+program that has stopped: whatever it wants is a bit this emulator is
+not setting. The address says which register and the value says what it
+keeps answering, which between them usually name the device to look at.
+It is said once per stall, not once per read.
+
+Nothing else about a hang shows: no fault, no unimplemented anything,
+the frames keep coming and the emulator runs on at full speed. Without
+this a stuck program looks exactly like a working one, which is how
+`gpu/mask-bit` came to be recorded as passing while it was really
+spinning on GPUSTAT bit 28.
+
 ## Formatting and linting
 
 `clang-format` fixes layout and include ordering; `clang-tidy` looks

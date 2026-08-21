@@ -150,6 +150,18 @@ struct Bus {
     // register are one missing device, not two.
     bool note_unhandled(u32 addr);
 
+    // Watches how hard a hardware register is being read, and says so
+    // when one of them is being read to the exclusion of all other
+    // work. Software on this machine waits by reading a register until
+    // a bit flips, so a register read half a million times in a second
+    // is the shape a stalled guest has: no fault, no unimplemented
+    // anything, just a program that is never going to be let go.
+    //
+    // It is what a hang looks like from outside, and without it a hang
+    // looks like nothing at all — the emulator runs on and reports a
+    // clean run while the program inside it has stopped.
+    void note_poll(u32 addr, u32 value);
+
     std::array<u8, RAM_SIZE> ram{};
     std::array<u8, BIOS_SIZE> bios{};
     std::array<u8, SCRATCHPAD_SIZE> scratchpad{};
@@ -168,6 +180,19 @@ struct Bus {
     // Bounded by the number of distinct unhandled addresses a game
     // actually touches, which is small.
     std::unordered_set<u32> reported_addresses;
+
+    // The register note_poll is counting. One slot rather than a count
+    // per address: a wait loop reads one register, and the handful of
+    // reads an interrupt makes in between are a different address and
+    // leave the count where it was.
+    struct Poll {
+        u32 address = 0;
+        u32 value = 0;  // its last answer, for the report
+        u64 since = 0;  // the cycle this window opened at
+        u64 reads = 0;
+        bool reported = false;
+    };
+    Poll poll;
 
     // Set while a debugger wants to see memory accesses, and null the
     // rest of the time. A null check on the access paths is a branch

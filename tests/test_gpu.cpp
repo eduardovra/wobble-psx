@@ -297,6 +297,12 @@ TEST_CASE("a VRAM to CPU transfer reads back through GPUREAD")
     gpu.write_gp0((1u << 16) | 2);
 
     CHECK((gpu.status() & (1u << 27)) != 0);  // ready to send
+    // Waiting to be read from occupies the way out and leaves the way
+    // in alone: a command or a block would still be taken. Software
+    // that starts a read and then waits for the GPU — which is what
+    // every PSn00bSDK primitive ends with — waits on exactly this bit.
+    CHECK((gpu.status() & (1u << 28)) != 0);  // and still ready for a block
+    CHECK((gpu.status() & (1u << 26)) != 0);  // and for a command
     CHECK(gpu.read() == 0x22221111);
     CHECK((gpu.status() & (1u << 27)) == 0);  // and done
 }

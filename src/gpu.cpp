@@ -377,9 +377,20 @@ u32 Gpu::status() const
     // for a block, and software that uploads a picture polls this one
     // before every block it sends — an MDEC frame reaching the screen
     // depends on it.
+    //
+    // It answers for the way in, and nothing else. A transfer out of
+    // VRAM occupies the way out: the GPU is holding pixels for the CPU
+    // to collect and will still take a command or a block while it
+    // waits, so the block bit stays set throughout one. That leaves it
+    // set always, because what would clear it is a full command FIFO
+    // and there is no FIFO here. Saying otherwise hangs anything that
+    // waits for the GPU after starting a read — PSn00bSDK ends every
+    // DrawPrim with a DrawSync, which with DMA off is a spin on this
+    // bit alone, and gpu/mask-bit never returns from its first
+    // readback.
     const bool ready_for_command = mode != Gp0Mode::ImageLoad;
     const bool ready_to_send = mode == Gp0Mode::ImageStore;
-    const bool ready_for_block = mode != Gp0Mode::ImageStore;
+    constexpr bool ready_for_block = true;
     value |= static_cast<u32>(ready_for_command) << 26;
     value |= static_cast<u32>(ready_to_send) << 27;
     value |= static_cast<u32>(ready_for_block) << 28;

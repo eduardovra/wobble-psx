@@ -116,9 +116,9 @@ void Bus::visit_state(State& state)
 {
     // The BIOS image is not saved: it is read-only and comes from the
     // same file either way, so a state carries only what the machine
-    // could have changed. reported_addresses is left out for the same
-    // reason in reverse — it is the emulator's own bookkeeping, not
-    // anything the console has.
+    // could have changed. reported_addresses and the poll count are
+    // left out for the same reason in reverse — they are the
+    // emulator's own bookkeeping, not anything the console has.
     state(ram);
     state(scratchpad);
     irq.visit_state(state);
@@ -305,6 +305,55 @@ bool Bus::note_unhandled(u32 addr)
     return reported_addresses.insert(addr).second;
 }
 
+void Bus::note_poll(u32 addr, u32 value)
+{
+    // Half a million reads of one register inside a second of console
+    // time is a program doing nothing else whatsoever: at four or five
+    // instructions to a read there is no room left in the second for
+    // anything but the loop. Real waits are shorter than that by
+    // orders of magnitude — a DMA channel finishes in microseconds,
+    // and a program waiting a whole second for the drive spends it
+    // drawing rather than spinning.
+    //
+    // Counting against a window rather than since the last read of
+    // some other register is what makes it hold: a wait loop is
+    // interrupted sixty times a second by a handler that reads the
+    // interrupt controller, and that must not read as the loop having
+    // moved on.
+    constexpr u64 STUCK_READS = 500'000;
+    constexpr u64 WINDOW = CPU_CLOCK_HZ;
+
+    const bool window_over = scheduler.now - poll.since > WINDOW;
+    if (addr != poll.address) {
+        // Another register takes the slot only once the one in it has
+        // stopped being read, so that the handler's reads above do not
+        // evict the loop they interrupted.
+        if (poll.reads > 0 && !window_over) {
+            return;
+        }
+        poll = Poll{addr, value, scheduler.now, 0, false};
+    } else if (window_over) {
+        poll.since = scheduler.now;
+        poll.reads = 0;
+    }
+
+    poll.value = value;
+    poll.reads++;
+    if (poll.reads < STUCK_READS || poll.reported) {
+        return;
+    }
+    // Once per stall, not once per read and not once per window: a
+    // program that is stuck stays stuck, and the line saying so is
+    // worth nothing repeated.
+    poll.reported = true;
+    log_message(std::format("bus: {:08X} read {} times in a second, "
+                            "answering {:08X} — the guest is waiting for "
+                            "something that is not coming",
+                            poll.address,
+                            poll.reads,
+                            poll.value));
+}
+
 bool Bus::load_bios(const std::string& path)
 {
     std::ifstream file(path, std::ios::binary);
@@ -335,6 +384,7 @@ u32 Bus::read32(u32 addr)
     if (phys >= IO_START && phys < IO_END) {
         u32 value = 0;
         read_io(phys, value, 4);  // 0 for a device that does not exist yet
+        note_poll(phys, value);
         return value;
     }
     if (in_expansion2(phys)) {
@@ -365,6 +415,7 @@ u16 Bus::read16(u32 addr)
     if (phys >= IO_START && phys < IO_END) {
         u32 value = 0;
         read_io(phys, value, 2);
+        note_poll(phys, value);
         return static_cast<u16>(value);
     }
     if (in_expansion2(phys)) {
@@ -395,6 +446,7 @@ u8 Bus::read8(u32 addr)
     if (phys >= IO_START && phys < IO_END) {
         u32 value = 0;
         read_io(phys, value, 1);
+        note_poll(phys, value);
         return static_cast<u8>(value);
     }
     if (in_expansion2(phys)) {

@@ -35,6 +35,58 @@ TEST_CASE("a read and a write to one register are one missing device")
     CHECK_FALSE(bus->note_unhandled(UNMAPPED));
 }
 
+TEST_CASE("a register read to the exclusion of all else is a stalled guest")
+{
+    LooseBus bus;
+    constexpr u32 GPUSTAT = 0x1F801814;
+    constexpr u32 IRQ_STATUS = 0x1F801070;
+
+    for (int i = 0; i < 1000; i++) {
+        bus->read32(GPUSTAT);
+    }
+    CHECK(bus->poll.address == GPUSTAT);
+    CHECK(bus->poll.reads == 1000);
+    CHECK_FALSE(bus->poll.reported);
+
+    // A handler interrupting the wait to read its own register is not
+    // the wait moving on, and does not start the count over.
+    bus->read32(IRQ_STATUS);
+    bus->read32(GPUSTAT);
+    CHECK(bus->poll.address == GPUSTAT);
+    CHECK(bus->poll.reads == 1001);
+
+    // A second of console time is as far as one count reaches, so a
+    // register read steadily but slowly never adds up to a stall.
+    bus.scheduler.now += CPU_CLOCK_HZ + 1;
+    bus->read32(GPUSTAT);
+    CHECK(bus->poll.reads == 1);
+}
+
+TEST_CASE("a stall is reported once and not once per read")
+{
+    LooseBus bus;
+    constexpr u32 GPUSTAT = 0x1F801814;
+    constexpr u64 STUCK_READS = 500'000;
+
+    for (u64 i = 0; i < STUCK_READS - 1; i++) {
+        bus->read32(GPUSTAT);
+    }
+    CHECK_FALSE(bus->poll.reported);
+
+    bus->read32(GPUSTAT);
+    CHECK(bus->poll.reported);
+
+    // A stuck program stays stuck, so the next window reaches the same
+    // count again — and finds the report already made, which is what
+    // keeps one stall to one line.
+    bus.scheduler.now += CPU_CLOCK_HZ + 1;
+    for (u64 i = 0; i < STUCK_READS; i++) {
+        bus->read32(GPUSTAT);
+    }
+    CHECK(bus->poll.reads == STUCK_READS);
+    CHECK(bus->poll.reported);
+}
+
 TEST_CASE("KUSEG, KSEG0 and KSEG1 are windows onto the same RAM")
 {
     const LooseBus bus;
