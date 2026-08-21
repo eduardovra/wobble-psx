@@ -24,7 +24,7 @@
 // at the front makes a mismatch an error rather than a mystery.
 struct State {
     static constexpr u32 MAGIC = 0x42424F57;  // "WOBB"
-    static constexpr u32 VERSION = 10;
+    static constexpr u32 VERSION = 11;
 
     bool saving = true;
     std::vector<u8> bytes;

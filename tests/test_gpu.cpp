@@ -394,7 +394,7 @@ TEST_CASE("the DMA direction decides what the request bit answers")
 
 TEST_CASE("the GPU ports are reachable through the bus")
 {
-    const LooseBus bus;
+    LooseBus bus;
 
     bus->write32(Gpu::GP1, 0x08000000 | (1u << 3));
     CHECK((bus->read32(Gpu::GP1) & (1u << 20)) != 0);

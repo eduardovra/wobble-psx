@@ -20,12 +20,19 @@ struct State;
 //   0x1F8010F0           DPCR  per-channel enable and priority
 //   0x1F8010F4           DICR  per-channel interrupt enable and flags
 //
-// Writing CHCR's start bits is what runs a transfer, so the controller
-// has no step of its own: run_dma() moves the whole thing at once,
-// inside the store instruction that started it. Real hardware
-// interleaves with the CPU and takes time doing it, which matters for
-// timing but not yet for correctness — nothing here can observe the
-// difference, because the CPU is stopped for the duration either way.
+// Writing CHCR's start bits arms a channel; the controller then runs
+// on the scheduler, a block to an event, until the channel is done.
+// That is what makes a transfer take time: the store that starts one
+// returns immediately, and software watching CHCR's busy bit sees it
+// stay up for as long as the words take to move.
+//
+// Two clocks come out of that, and they are not the same. A block's
+// words are read or written back to back and the CPU cannot touch RAM
+// while they are — that is the *hold*, and it stalls the CPU. What
+// comes after is the *gap*: the controller waiting for a slow device
+// to want the next block, or handing the CPU the window that
+// chopping promised it. The bus is the CPU's again during a gap, and
+// a transfer that is mostly gap is one a game can work through.
 struct Dma {
     static constexpr u32 BASE = 0x1F801080;
     static constexpr u32 END = 0x1F801100;
@@ -51,9 +58,21 @@ struct Dma {
     };
 
     struct Channel {
-        u32 base = 0;     // MADR
-        u32 block = 0;    // BCR
-        u32 control = 0;  // CHCR
+        // MADR, BCR and CHCR. The first two are not only settings: a
+        // running transfer walks MADR along RAM and counts BCR's
+        // block half down, and software reading either of them while
+        // it runs sees how far it has got.
+        u32 base = 0;
+        u32 block = 0;
+        u32 control = 0;
+
+        // Set once the controller has taken the channel up and not
+        // yet finished with it. `remaining` is what is left to do:
+        // words for a Manual transfer, blocks for a Request one, and
+        // nothing for a linked list, which knows it is done only when
+        // it reaches the end marker.
+        bool running = false;
+        u32 remaining = 0;
 
         SyncMode sync_mode() const;
 
@@ -65,9 +84,22 @@ struct Dma {
         // ordering table is built.
         bool address_decreasing() const;
 
-        // How many words a Manual or Request transfer moves. Undefined
-        // for a linked list, which is bounded by its end marker.
+        // How many words a Manual transfer moves, and how a Request
+        // one is divided. Undefined for a linked list, which is
+        // bounded by its end marker.
         u32 transfer_words() const;
+        u32 block_words() const;
+        u32 block_count() const;
+
+        // Chopping: a Manual transfer that would otherwise hold the
+        // bus from beginning to end, told to let go of it every so
+        // often. `chop_words` is how many words it moves before it
+        // does, `chop_cpu_cycles` how long it leaves the CPU alone
+        // afterwards — both powers of two, both written as the
+        // exponent.
+        bool chopping() const;
+        u32 chop_words() const;
+        u32 chop_cpu_cycles() const;
 
         // Whether the channel has been told to go. Manual transfers
         // need an explicit trigger as well as being enabled; the
@@ -96,17 +128,22 @@ struct Dma {
 
     static constexpr u32 NO_CHANNEL = CHANNEL_COUNT;
 
-    // What a write leaves for the caller to do, since both of them
-    // need the rest of the machine and this holds only the registers.
-    struct Written {
-        u32 channel = NO_CHANNEL;  // a transfer the write started
-        bool interrupt = false;    // it brought the interrupt line up
-    };
-
-    Written write_register(u32 phys, u32 value);
+    // Reports whether the write brought the controller's interrupt
+    // line up, which is the one thing it cannot do for itself. What
+    // it may also have done — armed a channel — is left to the caller
+    // to notice, because starting one needs the rest of the machine.
+    bool write_register(u32 phys, u32 value);
 
     // Whether a channel is both switched on in DPCR and started.
     bool channel_ready(u32 channel) const;
+
+    // Which channel gets the bus next, or NO_CHANNEL when none can
+    // take it. DPCR gives each a priority, nought being the highest;
+    // where two are equal the higher-numbered channel wins, which is
+    // the order hardware settles it in. `asking` is a bit per channel
+    // whose device wants the bus — a channel the register bits have
+    // armed still waits its turn behind one whose device is ready.
+    u32 arbitrate(u32 asking) const;
 
     // Records that a channel finished, and reports whether that has
     // brought the controller's interrupt line up. A channel whose
@@ -139,7 +176,20 @@ private:
     static u32 lane_shift(u32 phys);
 };
 
-// Runs a channel's transfer to completion. Lives outside Dma because
-// it needs RAM and the device at the other end, which is to say the
-// whole machine.
-void run_dma(Bus& bus, u32 channel);
+// One turn of the controller: gives the bus to whichever channel wants
+// it most, moves a block, and asks the scheduler to come back when
+// that block has been paid for. Lives outside Dma because it needs RAM
+// and the device at the other end, which is to say the whole machine.
+//
+// `deadline` is the cycle the turn was due on, which is a little
+// behind the clock — the CPU can only stop between instructions. The
+// next turn is timed from it rather than from now, or every overshoot
+// is added to the transfer and a long one finishes late by the sum of
+// them all.
+void dma_event(Bus& bus, u64 deadline);
+
+// Looks again at what the channels are asking for, and wakes the
+// controller when one of them wants the bus and nothing has it. Every
+// write to a DMA register goes through here, because any of them can
+// be the one that arms a channel.
+void dma_wake(Bus& bus);

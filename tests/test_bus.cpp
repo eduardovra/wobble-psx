@@ -14,7 +14,7 @@ constexpr u32 UNMAPPED = 0x1F900000;
 
 TEST_CASE("an unhandled address is reported once, however often it is hit")
 {
-    const LooseBus bus;
+    LooseBus bus;
 
     CHECK(bus->note_unhandled(UNMAPPED));
     CHECK_FALSE(bus->note_unhandled(UNMAPPED));
@@ -26,7 +26,7 @@ TEST_CASE("an unhandled address is reported once, however often it is hit")
 
 TEST_CASE("a read and a write to one register are one missing device")
 {
-    const LooseBus bus;
+    LooseBus bus;
 
     bus->read32(UNMAPPED);
     CHECK_FALSE(bus->note_unhandled(UNMAPPED));
@@ -89,7 +89,7 @@ TEST_CASE("a stall is reported once and not once per read")
 
 TEST_CASE("KUSEG, KSEG0 and KSEG1 are windows onto the same RAM")
 {
-    const LooseBus bus;
+    LooseBus bus;
     bus->write32(0x00001000, 0xDEADBEEF);
 
     CHECK(bus->read32(0x00001000) == 0xDEADBEEF);  // KUSEG
@@ -103,7 +103,7 @@ TEST_CASE("KUSEG, KSEG0 and KSEG1 are windows onto the same RAM")
 
 TEST_CASE("memory is little-endian")
 {
-    const LooseBus bus;
+    LooseBus bus;
     bus->write32(0x00001000, 0x12345678);
 
     CHECK(bus->read8(0x00001000) == 0x78);
@@ -113,14 +113,14 @@ TEST_CASE("memory is little-endian")
 
 TEST_CASE("an absent expansion device reads as all ones")
 {
-    const LooseBus bus;
+    LooseBus bus;
 
     CHECK(bus->read8(0x1F000000) == 0xFF);
 }
 
 TEST_CASE("an absent expansion device reads as all ones at every width")
 {
-    const LooseBus bus;
+    LooseBus bus;
 
     // Expansion 2, the debug port, is the one the console leaves in
     // the middle of the register range.
@@ -131,7 +131,7 @@ TEST_CASE("an absent expansion device reads as all ones at every width")
 
 TEST_CASE("a narrow write hands a device the whole register behind it")
 {
-    const LooseBus bus;
+    LooseBus bus;
 
     // DPCR takes all 32 bits of whatever the bus carried, so a byte
     // store leaves the register holding the word the store came from
@@ -143,7 +143,7 @@ TEST_CASE("a narrow write hands a device the whole register behind it")
 
 TEST_CASE("the CD-ROM's byte reaches every lane of a wider access")
 {
-    const LooseBus bus;
+    LooseBus bus;
 
     const u32 status = bus->read8(0x1F801800);
     CHECK(bus->read16(0x1F801800) == (status | status << 8));
@@ -153,7 +153,7 @@ TEST_CASE("the CD-ROM's byte reaches every lane of a wider access")
 
 TEST_CASE("a wider write to the CD-ROM leaves the byte it ends with")
 {
-    const LooseBus bus;
+    LooseBus bus;
 
     // The low two bits of the first register are the index the other
     // three are read through, and a halfword write sets them from its
@@ -165,7 +165,7 @@ TEST_CASE("a wider write to the CD-ROM leaves the byte it ends with")
 
 TEST_CASE("there is no instruction to fetch outside memory")
 {
-    const LooseBus bus;
+    LooseBus bus;
 
     bus->write32(0x00001000, 0xDEADBEEF);
     CHECK(bus->fetch(0x00001000) == 0xDEADBEEF);

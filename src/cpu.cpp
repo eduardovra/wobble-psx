@@ -163,7 +163,10 @@ u32 Cpu::step()
     }
 
     current_pc = pc;
-    bus.stall_cycles = 0;
+    // A transfer under way has the bus, and this instruction cannot
+    // fetch until it lets go — so the wait is charged before anything
+    // else the instruction costs.
+    bus.stall_cycles = bus.dma_stall();
     coprocessor_cycles = 0;
 
     // The BIOS exposes its kernel calls as jumps to fixed addresses,

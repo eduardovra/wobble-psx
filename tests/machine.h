@@ -1,10 +1,12 @@
 #pragma once
 
+#include <algorithm>
 #include <initializer_list>
 #include <memory>
 
 #include "bus.h"
 #include "cpu.h"
+#include "dma.h"
 #include "scheduler.h"
 
 // A bus with a clock of its own. Bus is built around a Scheduler
@@ -19,6 +21,25 @@ struct LooseBus {
 
     Bus& operator*() const { return *bus; }
     Bus* operator->() const { return bus.get(); }
+
+    // Lets a DMA transfer run. The controller is a state machine on
+    // the scheduler, a block to an event, so the store that starts one
+    // only arms it — something has to drive the clock afterwards, and
+    // on a bus with no CPU behind it that is this.
+    //
+    // Bounded, because a linked list that points back at itself never
+    // finishes, and a test of that has to be able to stop watching.
+    void settle(int blocks = 4096)
+    {
+        for (int block = 0; block < blocks; block++) {
+            const u64 due = scheduler.next_deadline_for(EventKind::Dma);
+            if (due == Scheduler::NEVER) {
+                return;
+            }
+            scheduler.now = std::max(scheduler.now, due);
+            dma_event(*bus, due);
+        }
+    }
 };
 
 // A CPU with RAM behind it, running a short program assembled into
@@ -30,6 +51,10 @@ struct Machine {
 
     LooseBus bus;
     Cpu cpu{*bus};
+
+    // As above: a program that starts a transfer has to be given the
+    // clock for it, since nothing here dispatches scheduler events.
+    void settle(int blocks = 4096) { bus.settle(blocks); }
 
     // The geometry engine is behind SR's COP2 enable, and a program
     // that wants it switches it on before its first instruction

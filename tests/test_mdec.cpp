@@ -61,7 +61,7 @@ u32 drain(Bus& bus)
 
 TEST_CASE("a command says how many words follow it")
 {
-    const LooseBus bus;
+    LooseBus bus;
 
     bus->write32(COMMAND, SET_QUANT_TABLES);
     CHECK((bus->read32(CONTROL) & 0xFFFF) == 15);
@@ -83,7 +83,7 @@ TEST_CASE("a command says how many words follow it")
 
 TEST_CASE("the colour form of the command loads both tables")
 {
-    const LooseBus bus;
+    LooseBus bus;
 
     bus->write32(COMMAND, SET_QUANT_TABLES | 1);
     CHECK((bus->read32(CONTROL) & 0xFFFF) == 31);
@@ -103,7 +103,7 @@ TEST_CASE("the colour form of the command loads both tables")
 
 TEST_CASE("the scale table arrives as signed halfwords")
 {
-    const LooseBus bus;
+    LooseBus bus;
 
     bus->write32(COMMAND, SET_SCALE_TABLE);
     for (u32 word = 0; word < 32; word++) {
@@ -117,7 +117,7 @@ TEST_CASE("the scale table arrives as signed halfwords")
 
 TEST_CASE("a reset abandons the command and empties the output")
 {
-    const LooseBus bus;
+    LooseBus bus;
 
     bus->write32(COMMAND, DECODE | DEPTH_FIFTEEN_BIT | 6);
     write_blocks(*bus, 6);
@@ -129,7 +129,7 @@ TEST_CASE("a reset abandons the command and empties the output")
 
 TEST_CASE("what a decode produces is as wide as its depth")
 {
-    const LooseBus bus;
+    LooseBus bus;
 
     SUBCASE("four bits a pixel, one block")
     {
@@ -162,7 +162,7 @@ TEST_CASE("what a decode produces is as wide as its depth")
 
 TEST_CASE("a macroblock comes out as sixteen-pixel rows")
 {
-    const LooseBus bus;
+    LooseBus bus;
 
     // Quantisation of sixteen throughout, and a scale table with one
     // entry: the inverse DCT then leaves the block's first coefficient
@@ -212,7 +212,7 @@ TEST_CASE("a macroblock comes out as sixteen-pixel rows")
 
 TEST_CASE("a macroblock arrives only once all six of its blocks have")
 {
-    const LooseBus bus;
+    LooseBus bus;
 
     bus->write32(COMMAND, DECODE | DEPTH_FIFTEEN_BIT | 6);
     write_blocks(*bus, 5);
@@ -225,7 +225,7 @@ TEST_CASE("a macroblock arrives only once all six of its blocks have")
 
 TEST_CASE("a block split across two transfers waits for the rest of it")
 {
-    const LooseBus bus;
+    LooseBus bus;
 
     bus->write32(COMMAND, DECODE | DEPTH_EIGHT_BIT | 2);
     // Half a block: the coefficient, with the end of it still to come.
@@ -238,7 +238,7 @@ TEST_CASE("a block split across two transfers waits for the rest of it")
 
 TEST_CASE("the decoder is fed and emptied by its two DMA channels")
 {
-    const LooseBus bus;
+    LooseBus bus;
 
     constexpr u32 SOURCE = 0x00010000;
     constexpr u32 DESTINATION = 0x00020000;
@@ -255,6 +255,7 @@ TEST_CASE("the decoder is fed and emptied by its two DMA channels")
     bus->write32(Dma::BASE + 0x00, SOURCE);
     bus->write32(Dma::BASE + 0x04, BLOCKS | (1u << 16));
     bus->write32(Dma::BASE + 0x08, (1u << 24) | (1u << 9) | 1);
+    bus.settle();
 
     CHECK((bus->read32(CONTROL) & BUSY) == 0);
     CHECK((bus->read32(CONTROL) & OUTPUT_EMPTY) == 0);
@@ -263,6 +264,7 @@ TEST_CASE("the decoder is fed and emptied by its two DMA channels")
     bus->write32(Dma::BASE + 0x10, DESTINATION);
     bus->write32(Dma::BASE + 0x14, 128 | (1u << 16));
     bus->write32(Dma::BASE + 0x18, (1u << 24) | (1u << 9));
+    bus.settle();
 
     CHECK((bus->read32(CONTROL) & OUTPUT_EMPTY) != 0);
 

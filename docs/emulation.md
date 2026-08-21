@@ -86,9 +86,11 @@ the colours it decoded rather than as every third pixel of them.
 
 The timing is not the hardware's either. A real MDEC decodes while the
 data-in channel is still feeding it and stalls that channel when it
-gets ahead; here a word is decoded the moment it is written, because a
-DMA transfer runs to completion inside the store that starts one.
-Software sees the same words in the same order, and sooner.
+gets ahead; here a word is decoded the moment it is written, and the
+channel is never told to wait. The transfer around it does take time —
+the controller moves a block to a scheduled event and charges the CPU
+the bus while it does — but the decoder inside it keeps up with
+whatever it is handed.
 
 ## Sound
 

@@ -34,6 +34,11 @@ u64 Scheduler::next_deadline() const
     return earliest;
 }
 
+u64 Scheduler::next_deadline_for(EventKind kind) const
+{
+    return deadlines[static_cast<std::size_t>(kind)];
+}
+
 std::optional<DueEvent> Scheduler::next_due()
 {
     std::size_t due = EVENT_COUNT;

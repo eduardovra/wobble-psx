@@ -3,6 +3,7 @@
 #include <algorithm>
 
 #include "cdrom.h"
+#include "dma.h"
 #include "gpu.h"
 #include "irq.h"
 #include "savestate.h"
@@ -71,6 +72,12 @@ void Console::dispatch_due_events()
             if (bus.sio.deliver_acknowledge()) {
                 bus.irq.raise(Interrupt::Controller);
             }
+            break;
+        case EventKind::Dma:
+            // The controller schedules its own next turn, for when the
+            // block it just moved has been paid for. It stops asking
+            // when no channel wants the bus any more.
+            dma_event(bus, event->deadline);
             break;
         case EventKind::Timers:
             bus.timers.advance(scheduler.now, bus.gpu, bus.irq);

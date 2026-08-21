@@ -136,11 +136,13 @@ TEST_CASE("each half of an unaligned load pays a whole access")
     CHECK(machine.cpu.step() == Bus::RAM_LOAD_CYCLES);
 }
 
-// A transfer moves as much memory as it likes, and all of it happens
-// inside the store to CHCR that starts it. Billing that to the store
-// would stop the clock dead for the length of the transfer, so the
-// instruction pays for its own write and nothing else.
-TEST_CASE("a DMA transfer is not billed to the store that starts it")
+// The store to CHCR arms a channel; it does not run it. So it pays for
+// its own write and nothing else, and none of the transfer is billed
+// to it. What the CPU does pay is the bus it has not got while the
+// words move — and that lands on the instruction that comes after,
+// which is the difference between a transfer taking time and a
+// transfer stopping the clock dead.
+TEST_CASE("the store that starts a transfer pays only for itself")
 {
     Machine machine;
     constexpr u32 IO_BASE = 0x1F800000;  // what the lui below leaves in t0
@@ -161,6 +163,16 @@ TEST_CASE("a DMA transfer is not billed to the store that starts it")
 
     CHECK(machine.cpu.step() == 1);
 
-    // The cycles were skipped, not the work.
+    // Nothing has moved yet: the channel is armed, and waiting for the
+    // first turn the controller gives it.
+    CHECK(machine.bus->read32(Machine::DATA) == 0);
+
+    machine.settle();
     CHECK(machine.bus->read32(Machine::DATA) != 0);
+
+    // Eight words of ordering table, and the controller had the bus
+    // for every one of them — which is the wait the next instruction
+    // to want RAM is charged, in place of the store being charged for
+    // a transfer it only asked for.
+    CHECK(machine.bus->dma_hold_until >= 8);
 }

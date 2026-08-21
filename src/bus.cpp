@@ -209,21 +209,16 @@ bool Bus::write_io(u32 phys, u32 value, u32 width)
     }
 
     if (phys >= Dma::BASE && phys < Dma::END) {
-        // A write to CHCR is what starts a transfer, so it happens
-        // here, inside the store instruction that asked for it.
-        const Dma::Written written = dma.write_register(phys, value);
-        if (written.interrupt) {
+        // A write to CHCR arms a channel rather than running it: the
+        // store returns, and the controller moves the words a block at
+        // a time on the scheduler afterwards. Any of these registers
+        // can be the one that arms something — CHCR's start bits,
+        // DPCR's enable — so the controller is asked to look again
+        // after every one of them.
+        if (dma.write_register(phys, value)) {
             irq.raise(Interrupt::Dma);
         }
-        if (written.channel != Dma::NO_CHANNEL) {
-            // The whole transfer happens inside this store, and costs
-            // it nothing: run_dma reaches RAM directly rather than
-            // through the read paths above, so none of its accesses
-            // are billed. DMA does take the bus away from the CPU on
-            // hardware, but charging that means running the transfer
-            // on the scheduler rather than all at once here.
-            run_dma(*this, written.channel);
-        }
+        dma_wake(*this);
         return true;
     }
     if (phys >= CdRom::BASE && phys < CdRom::END) {
@@ -367,6 +362,14 @@ bool Bus::load_bios(const std::string& path)
     file.read(reinterpret_cast<char*>(bios.data()),
               static_cast<std::streamsize>(bios.size()));
     return std::cmp_equal(file.gcount(), bios.size());
+}
+
+u32 Bus::dma_stall() const
+{
+    if (scheduler.now >= dma_hold_until) {
+        return 0;
+    }
+    return static_cast<u32>(dma_hold_until - scheduler.now);
 }
 
 // How long a load from this address stalls the CPU, beyond the one

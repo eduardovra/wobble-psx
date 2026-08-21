@@ -43,6 +43,13 @@ enum class EventKind : u32 {
     // there is nothing to wake up for until something is said.
     Sio,
 
+    // The DMA controller having the bus for another block. One kind
+    // covers all seven channels because the machine has one bus:
+    // whichever channel wins the arbitration is the one this moves,
+    // and the next event is scheduled for when it has paid for what
+    // it moved.
+    Dma,
+
     Count,  // sentinel: number of kinds, never a real event
 };
 
@@ -88,6 +95,10 @@ struct Scheduler {
     // is scheduled. The run loop uses it as the limit on how long the
     // CPU may run undisturbed.
     u64 next_deadline() const;
+
+    // The same for one kind alone, which is how a device asks whether
+    // it is already due to be woken before asking to be woken again.
+    u64 next_deadline_for(EventKind kind) const;
 
     // Removes and returns the earliest event that is now due, oldest
     // first, until none are left. A handler that wants to repeat must

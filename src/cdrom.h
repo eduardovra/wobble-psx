@@ -217,6 +217,12 @@ struct CdRom {
     // movement, once the FIFO has been read out.
     u8 read_data();
 
+    // Whether there is anything left in it to take. It is the drive's
+    // half of the DMA handshake: channel 3 is armed by software but
+    // paced by this, so a transfer asked for before a sector has
+    // arrived waits for it rather than reading zeroes off the end.
+    bool has_data() const { return data_cursor < data_end; }
+
     // Which bytes of a sector the mode register exposes: the payload
     // alone, or the whole sector from its header on, which is how a
     // game reads the subheader for itself.

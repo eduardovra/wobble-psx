@@ -149,6 +149,20 @@ struct Bus {
     // which region an address is in.
     u32 stall_cycles = 0;
 
+    // The clock through which the DMA controller has the bus to
+    // itself. There is one bus and one set of address lines: while a
+    // channel is reading or writing RAM the CPU cannot fetch or load,
+    // so it waits. That waiting is what makes a transfer cost the
+    // program that started it anything at all — without it the words
+    // would move for free beside a CPU that never noticed.
+    u64 dma_hold_until = 0;
+
+    // How long the CPU must wait before its next instruction, because
+    // the controller still has the bus. Nought once the hold has
+    // passed, and nought again the moment it has been charged, since
+    // charging it is what moves the clock past it.
+    u32 dma_stall() const;
+
     // Records an address that no device claimed, and reports whether
     // it had not been seen before. An unimplemented register is
     // usually polled in a loop, so logging every access buries the
