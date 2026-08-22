@@ -95,16 +95,31 @@ constexpr u32 LID_OPEN_FRAMES = 60;
 constexpr u64 CYCLES_PER_HOST_FRAME = CPU_CLOCK_HZ / 60;
 
 // How much sound may be waiting to be played before the emulator is
-// making it faster than the sound card is taking it. The two clocks
-// are never quite the same speed — the display paces one and a crystal
-// on the sound card the other — so whichever is faster, the queue
-// drifts. Left alone it either empties, which crackles, or grows until
-// the sound is a second behind the picture. Throwing away what is over
-// the mark keeps the delay bounded, at the cost of a dropout so short
-// it is not heard.
+// making it faster than the sound card is taking it. This is the
+// safety valve behind the pacing below rather than the thing that
+// holds the two clocks together: what is over the mark is thrown away,
+// which bounds the delay when a machine falls far enough behind that
+// the pacing cannot pull it back.
 constexpr int MAX_QUEUED_FRAMES = Spu::SAMPLE_RATE / 10;  // 100 ms
 constexpr int MAX_QUEUED_BYTES =
     MAX_QUEUED_FRAMES * static_cast<int>(sizeof(Spu::Frame));
+
+// How much sound should be waiting to be played. A pass makes about a
+// frame's worth and the card takes about a frame's worth, so left to
+// itself the queue sits near empty and every hitch in a pass runs it
+// dry. Silence spliced into a sound is heard as a click, and the
+// louder the sound the louder the click — which is why a starving
+// queue sounds like distortion rather than like a gap. Keeping three
+// frames standing in front of the card is what a hitch is spent
+// instead.
+constexpr int TARGET_QUEUED_FRAMES = Spu::SAMPLE_RATE / 20;  // 50 ms
+
+// The most a pass may be lengthened or shortened to get back to that.
+// Emulated time is the console's clock, so a trim is a change of speed
+// and of pitch: a third of a percent is far more than the hundredth of
+// a percent the two clocks drift apart by, and small enough that
+// nothing is heard bending while it converges.
+constexpr s64 MAX_TRIM_FRAMES = Spu::SAMPLE_RATE / 3000;
 
 // The sound card, if there is one. A machine with no audio device is
 // not a failure to start: the SPU runs either way, and the picture is
@@ -148,6 +163,31 @@ void push_audio(SDL_AudioStream* stream, Spu& spu)
                                frames.data(),
                                static_cast<int>(count * sizeof(Spu::Frame)));
     }
+}
+
+// Emulated time to run in one pass of the loop. A display is never
+// exactly 60 Hz and the sound card's crystal is its own, so a fixed
+// slice drifts one way or the other until the queue either empties or
+// fills. Taking the slice from how much sound is waiting runs the
+// console at the speed the card actually plays at, whatever the
+// display is doing — and a machine with no sound card falls back to
+// the display, which is all it has to go on.
+u64 cycles_for_pass(SDL_AudioStream* stream)
+{
+    if (stream == nullptr) {
+        return CYCLES_PER_HOST_FRAME;
+    }
+
+    const int queued =
+        SDL_GetAudioStreamQueued(stream) / static_cast<int>(sizeof(Spu::Frame));
+    const s64 short_by = TARGET_QUEUED_FRAMES - queued;
+
+    // An eighth of the shortfall at a time: correcting all of it in
+    // one pass would overshoot and set the queue swinging, and the
+    // console would audibly speed up and slow down with it.
+    const s64 trim =
+        std::clamp(short_by / 8, -MAX_TRIM_FRAMES, MAX_TRIM_FRAMES);
+    return CYCLES_PER_HOST_FRAME + static_cast<u64>(trim * Spu::TICK_CYCLES);
 }
 
 // The console's picture on its way to the window. The texture is made
@@ -555,7 +595,7 @@ int main(int argc, char** argv)
             // each time one is finished. A slice ending mid-frame
             // leaves the last finished picture standing, which is what
             // a television would still be showing.
-            u64 owed = CYCLES_PER_HOST_FRAME;
+            u64 owed = cycles_for_pass(audio);
             while (owed > 0 && !console.cpu.halted) {
                 const u64 before = console.scheduler.now;
                 const bool finished = console.run_until_frame(owed);
