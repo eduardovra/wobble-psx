@@ -478,6 +478,20 @@ bool device_asking(Bus& bus, u32 channel)
     switch (static_cast<Dma::Port>(channel)) {
     case Dma::Port::CdRom:
         return bus.cdrom.has_data();
+    case Dma::Port::MdecOut: {
+        // The decoder asks once it has a whole block to hand over.
+        // Asking sooner is what a transfer running beside the one
+        // feeding the decoder would do: it reads a FIFO not yet
+        // filled, takes zeroes for the words that are not there, and
+        // leaves the rest of the picture shifted by however many it
+        // took.
+        const Dma::Channel& settings = bus.dma.channels[channel];
+        u32 wanted = 1;
+        if (settings.sync_mode() == Dma::SyncMode::Request) {
+            wanted = settings.block_words();
+        }
+        return bus.mdec.data_out_words() >= wanted;
+    }
     default:
         return true;
     }

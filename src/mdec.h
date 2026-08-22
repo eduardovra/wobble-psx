@@ -34,12 +34,14 @@ struct State;
 // monochrome depths skip all of that and give one 8x8 block per block
 // decoded.
 //
-// The timing is not the hardware's. A real MDEC decodes while the
-// data-in channel is still feeding it and stalls that channel when it
-// gets ahead, which is what the two request bits in the status
-// register are for; here a word is decoded the moment it is written,
-// because DMA transfers run to completion inside the store that starts
-// one. Software sees the same words in the same order, and sooner.
+// The timing is not the hardware's. A real MDEC takes time over a
+// macroblock and stalls the channel feeding it while it does; here a
+// word is decoded the moment it is written, so the output is ready
+// the instant the last word of a macroblock arrives rather than a
+// while after it. Software sees the same words in the same order, and
+// sooner. What it does not see is an output FIFO handing back words
+// that are not in it: the channel reading the picture out waits for a
+// block's worth, which is what `data_out_words` is for.
 struct Mdec {
     static constexpr u32 BASE = 0x1F801820;
     static constexpr u32 END = 0x1F801828;
@@ -90,6 +92,14 @@ struct Mdec {
     u32 status() const;
 
     bool data_out_ready() const { return output_position < output.size(); }
+
+    // How many words are waiting to be taken away. The DMA controller
+    // asks before it takes a block, since a block half-full of words
+    // the decoder has not made yet is a block of zeroes.
+    u32 data_out_words() const
+    {
+        return static_cast<u32>(output.size() - output_position);
+    }
 
     // The two quantisation tables, luminance and chrominance, and the
     // matrix the inverse DCT is done with. All three are set by
