@@ -89,18 +89,15 @@ void open_lid_for(Console& console, const char* path)
 // same instant would be a swap nothing had the chance to notice.
 constexpr u32 LID_OPEN_FRAMES = 60;
 
-// Emulated time to run per host frame. The renderer is vsynced to
-// 60 Hz, so running one sixtieth of a second of console time per pass
-// keeps the emulator at roughly real speed.
-constexpr u64 CYCLES_PER_HOST_FRAME = CPU_CLOCK_HZ / 60;
-
 // How much sound may be waiting to be played before the emulator is
 // making it faster than the sound card is taking it. This is the
 // safety valve behind the pacing below rather than the thing that
 // holds the two clocks together: what is over the mark is thrown away,
 // which bounds the delay when a machine falls far enough behind that
-// the pacing cannot pull it back.
-constexpr int MAX_QUEUED_FRAMES = Spu::SAMPLE_RATE / 10;  // 100 ms
+// the pacing cannot pull it back. It has to be deeper than the longest
+// slice below, or a pass presented late would have most of the sound
+// it made thrown away rather than played.
+constexpr int MAX_QUEUED_FRAMES = Spu::SAMPLE_RATE / 4;  // 250 ms
 constexpr int MAX_QUEUED_BYTES =
     MAX_QUEUED_FRAMES * static_cast<int>(sizeof(Spu::Frame));
 
@@ -114,11 +111,28 @@ constexpr int MAX_QUEUED_BYTES =
 // instead.
 constexpr int TARGET_QUEUED_FRAMES = Spu::SAMPLE_RATE / 20;  // 50 ms
 
-// The most a pass may be lengthened or shortened to get back to that.
-// Emulated time is the console's clock, so a trim is a change of speed
-// and of pitch: a third of a percent is far more than the hundredth of
-// a percent the two clocks drift apart by, and small enough that
-// nothing is heard bending while it converges.
+// The most console time one pass may run. A pass normally covers the
+// time since the last one, which is a frame; this is the ceiling for
+// when it is not — a window dragged, a breakpoint sat at, a machine
+// waking from sleep — so that the console catches up over several
+// passes rather than running minutes of a game in one.
+constexpr u64 MAX_SLICE_CYCLES = CPU_CLOCK_HZ / 4;  // 250 ms
+
+// How long a pass should take. The loop paces itself rather than
+// letting the display do it: on a compositor a present waits for the
+// compositor to ask for a frame, and a window you have switched away
+// from is not asked for frames — for as long as it takes you to come
+// back. Waiting on that is a console that stops dead, so nothing here
+// ever waits on it.
+constexpr u64 PASS_NS = 1'000'000'000 / 60;
+
+// The most a pass may be lengthened or shortened to get back to that:
+// fourteen frames out of a pass's seven hundred and thirty-five, which
+// is two percent. Emulated time is the console's clock, so a trim is a
+// change of speed and of pitch — two percent is a third of a semitone,
+// heard only if it were held, and it is not: it is a hundred times the
+// hundredth of a percent the two clocks drift apart by, so it converges
+// in a moment and sits at nothing.
 constexpr s64 MAX_TRIM_FRAMES = Spu::SAMPLE_RATE / 3000;
 
 // The sound card, if there is one. A machine with no audio device is
@@ -165,17 +179,66 @@ void push_audio(SDL_AudioStream* stream, Spu& spu)
     }
 }
 
-// Emulated time to run in one pass of the loop. A display is never
-// exactly 60 Hz and the sound card's crystal is its own, so a fixed
-// slice drifts one way or the other until the queue either empties or
-// fills. Taking the slice from how much sound is waiting runs the
-// console at the speed the card actually plays at, whatever the
-// display is doing — and a machine with no sound card falls back to
-// the display, which is all it has to go on.
-u64 cycles_for_pass(SDL_AudioStream* stream)
+// Whether there is any point handing a picture over. A window that is
+// covered, shrunk to the taskbar, or simply not the one being typed at
+// is a window the compositor has stopped asking for frames — and a
+// present it has not asked for is one that waits until it does, which
+// may be until you come back. Nothing is presented to such a window,
+// so nothing waits on it. Read immediately before presenting rather
+// than at the top of the pass: switching away is something that
+// happens between one and the other.
+bool worth_presenting(SDL_Window* window)
+{
+    const SDL_WindowFlags flags = SDL_GetWindowFlags(window);
+    const SDL_WindowFlags out_of_sight =
+        SDL_WINDOW_MINIMIZED | SDL_WINDOW_OCCLUDED;
+    if ((flags & out_of_sight) != 0) {
+        return false;
+    }
+    return (flags & SDL_WINDOW_INPUT_FOCUS) != 0;
+}
+
+// The end of a pass: whenever the last one ended, plus a frame. Timing
+// the wait from a deadline rather than from now keeps the work a pass
+// does from being added to the wait, and a machine that has fallen
+// behind takes its next deadline from the clock rather than trying to
+// make up passes it has missed.
+void wait_for_pass(u64& deadline)
+{
+    const u64 now = SDL_GetTicksNS();
+    if (deadline <= now) {
+        deadline = now + PASS_NS;
+        return;
+    }
+    SDL_DelayNS(deadline - now);
+    deadline += PASS_NS;
+}
+
+// Console time owed for the real time that has passed since the last
+// pass. A pass is normally one refresh of the display, but a window
+// nobody is looking at is a window a compositor presents a few times a
+// second or not at all — and a fixed frame's worth per pass would then
+// run the console a few frames a second too, which is not heard as a
+// slow picture but as the sound stopping and starting again in time
+// with them. What the console owes is time, not passes.
+u64 elapsed_cycles(u64& since)
+{
+    const u64 now = SDL_GetTicksNS();
+    const u64 elapsed = now - since;
+    since = now;
+    return std::min(elapsed * CPU_CLOCK_HZ / 1'000'000'000, MAX_SLICE_CYCLES);
+}
+
+// That slice, trimmed by how far the sound queue is from where it
+// should be. Wall time and the sound card's crystal are two clocks and
+// never quite the same speed, so left alone the queue drifts one way
+// or the other until it empties or fills; the trim runs the console at
+// the speed the card actually plays at. A machine with no sound card
+// has only the clock to go on, and keeps the slice as it is.
+u64 cycles_for_pass(SDL_AudioStream* stream, u64 slice)
 {
     if (stream == nullptr) {
-        return CYCLES_PER_HOST_FRAME;
+        return slice;
     }
 
     const int queued =
@@ -187,7 +250,9 @@ u64 cycles_for_pass(SDL_AudioStream* stream)
     // console would audibly speed up and slow down with it.
     const s64 trim =
         std::clamp(short_by / 8, -MAX_TRIM_FRAMES, MAX_TRIM_FRAMES);
-    return CYCLES_PER_HOST_FRAME + static_cast<u64>(trim * Spu::TICK_CYCLES);
+    const s64 cycles_a_frame = static_cast<s64>(Spu::TICK_CYCLES);
+    const s64 trimmed = static_cast<s64>(slice) + trim * cycles_a_frame;
+    return static_cast<u64>(std::max<s64>(trimmed, 0));
 }
 
 // The console's picture on its way to the window. The texture is made
@@ -544,7 +609,11 @@ int main(int argc, char** argv)
         SDL_Log("SDL_CreateRenderer failed: %s", SDL_GetError());
         return 1;
     }
-    SDL_SetRenderVSync(renderer, 1);
+    // The loop keeps its own time (see wait_for_pass), so a present
+    // hands the picture over and returns. Waiting for a refresh is
+    // waiting on the compositor, and the compositor stops asking a
+    // window you have switched away from for anything at all.
+    SDL_SetRenderVSync(renderer, 0);
 
     SDL_AudioStream* audio = open_audio();
 
@@ -565,6 +634,8 @@ int main(int argc, char** argv)
     size_t tty_logged_upto = 0;
     bool running = true;
     u32 lid_open_frames = 0;
+    u64 last_pass = SDL_GetTicksNS();
+    u64 pass_deadline = last_pass + PASS_NS;
     while (running) {
         SDL_Event event;
         while (SDL_PollEvent(&event)) {
@@ -586,8 +657,9 @@ int main(int argc, char** argv)
             }
         }
 
+        const u64 slice = elapsed_cycles(last_pass);
         if (emu_running) {
-            // A fixed slice of console time per host frame is what
+            // The console owes the time that has passed, which is what
             // keeps the machine running at its own speed whatever the
             // window is doing. Where in the console's frame that slice
             // ends is nobody's business but the picture's, so the
@@ -595,7 +667,7 @@ int main(int argc, char** argv)
             // each time one is finished. A slice ending mid-frame
             // leaves the last finished picture standing, which is what
             // a television would still be showing.
-            u64 owed = cycles_for_pass(audio);
+            u64 owed = cycles_for_pass(audio, slice);
             while (owed > 0 && !console.cpu.halted) {
                 const u64 before = console.scheduler.now;
                 const bool finished = console.run_until_frame(owed);
@@ -633,7 +705,11 @@ int main(int argc, char** argv)
         SDL_RenderClear(renderer);
         present_display(renderer, display, region);
         ImGui_ImplSDLRenderer3_RenderDrawData(ImGui::GetDrawData(), renderer);
-        SDL_RenderPresent(renderer);
+
+        if (worth_presenting(window)) {
+            SDL_RenderPresent(renderer);
+        }
+        wait_for_pass(pass_deadline);
     }
 
     SDL_DestroyAudioStream(audio);

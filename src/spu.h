@@ -224,7 +224,11 @@ private:
     // console has no such buffer — so it is neither saved nor
     // restored, and a host that never drains it loses the oldest
     // frames rather than stalling the machine that is filling it.
-    static constexpr u32 OUTPUT_FRAMES = 8192;  // 186 ms at 44.1 kHz
+    // It has to hold the longest run the host can make in one go, or
+    // a window presented a few times a second — where each pass runs
+    // a quarter of a second of console at once — would lose the sound
+    // it made past the end of it.
+    static constexpr u32 OUTPUT_FRAMES = 16384;  // 372 ms at 44.1 kHz
     std::array<Frame, OUTPUT_FRAMES> output{};
     u64 produced = 0;
     u64 taken = 0;
