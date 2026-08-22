@@ -501,6 +501,7 @@ void draw_triangle(Gpu& gpu,
             if (!inside) {
                 continue;
             }
+            gpu.pixels_drawn++;
 
             const Rgb tint = {planes.red.at(x, y),
                               planes.green.at(x, y),
@@ -638,6 +639,7 @@ void draw_line(Gpu& gpu,
         if (!inside) {
             continue;
         }
+        gpu.pixels_drawn++;
 
         put(gpu,
             state,
@@ -685,6 +687,7 @@ void draw_rectangle(
                 x > static_cast<s32>(state.clip_right)) {
                 continue;
             }
+            gpu.pixels_drawn++;
 
             Rgb colour = tint;
             bool translucent = how.translucent;

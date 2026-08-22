@@ -397,7 +397,7 @@ u32 read_from_device(Bus& bus, u32 channel, u32 address, u32 remaining)
         }
         return (address - 4) & RAM_ADDRESS_MASK;
     case Dma::Port::Gpu:
-        return bus.gpu.read();
+        return bus.gpu.read(bus.scheduler.now);
     case Dma::Port::Spu:
         return bus.spu.read_dma();
     case Dma::Port::CdRom: {
@@ -423,7 +423,7 @@ void write_to_device(Bus& bus, u32 channel, u32 word)
         bus.mdec.write_data(word);
         break;
     case Dma::Port::Gpu:
-        bus.gpu.write_gp0(word);
+        bus.gpu.write_gp0(word, bus.scheduler.now);
         break;
     case Dma::Port::Spu:
         bus.spu.write_dma(word);
@@ -478,6 +478,20 @@ bool device_asking(Bus& bus, u32 channel)
     switch (static_cast<Dma::Port>(channel)) {
     case Dma::Port::CdRom:
         return bus.cdrom.has_data();
+    case Dma::Port::Gpu: {
+        // Drawing takes the GPU time, and a channel feeding it faster
+        // than it draws is what the request line exists to stop. Which
+        // way round to ask is taken from the channel rather than from
+        // GP1(04h), which reports the same wire in GPUSTAT bit 25: the
+        // controller already knows which way it is moving words, and a
+        // transfer set up without the GPU having been told twice still
+        // has to happen.
+        const u64 now = bus.scheduler.now;
+        if (bus.dma.channels[channel].to_device()) {
+            return bus.gpu.ready_for_block(now);
+        }
+        return bus.gpu.ready_to_send(now);
+    }
     case Dma::Port::MdecOut: {
         // The decoder asks once it has a whole block to hand over.
         // Asking sooner is what a transfer running beside the one
@@ -495,6 +509,26 @@ bool device_asking(Bus& bus, u32 channel)
     default:
         return true;
     }
+}
+
+// What the device is still busy with once a block has been handed to
+// it. The GPU is the one that charges by the pixel, and a block of
+// drawing commands can leave it working for far longer than the words
+// took to move — time the controller cannot ask it for another block.
+//
+// It is asked for rather than discovered by polling because polling
+// has a period: asking again every RETRY_CYCLES rounds every wait up
+// to the next multiple of it, and gpu/bandwidth is sensitive enough to
+// that to time a VRAM readback two and a half times too slow.
+u64 device_backlog(Bus& bus, u32 channel, u64 deadline)
+{
+    if (static_cast<Dma::Port>(channel) != Dma::Port::Gpu) {
+        return 0;
+    }
+    if (!bus.gpu.drawing(deadline)) {
+        return 0;
+    }
+    return bus.gpu.busy_until - deadline;
 }
 
 // How much of a block the controller reads or writes RAM for, and how
@@ -617,6 +651,14 @@ BlockCost step_linked_list(Bus& bus, u32 channel)
             return {hold, 0};
         }
         settings.base = header & MADR_MASK;
+
+        // A slice is a length of bus time, not a number of packets,
+        // and a display list longer than the GPU can draw would spend
+        // the whole of one running ahead of it. Asking again between
+        // packets is what holds the list to the speed of the drawing.
+        if (!device_asking(bus, channel)) {
+            break;
+        }
     }
 
     settings.remaining = 1;  // still something to follow
@@ -716,8 +758,12 @@ void dma_event(Bus& bus, u64 deadline)
         }
     }
 
-    // Always strictly later, so a channel that transfers nothing at
-    // all — an empty linked-list packet — still lets the clock move.
-    const u64 spent = std::max<u64>(cost.hold + cost.gap, 1);
+    // The next block waits for the bus and then for the device: what
+    // the GPU was left drawing is time the controller cannot ask it
+    // for more. Always strictly later, so a channel that transfers
+    // nothing at all — an empty linked-list packet — still lets the
+    // clock move.
+    const u64 backlog = device_backlog(bus, channel, deadline);
+    const u64 spent = std::max<u64>(cost.hold + cost.gap + backlog, 1);
     bus.scheduler.schedule_at(EventKind::Dma, deadline + spent);
 }

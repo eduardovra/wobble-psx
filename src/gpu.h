@@ -28,6 +28,13 @@ struct State;
 // display list and no deferral, because that is what the hardware does
 // and there is nothing here a frame boundary would let us batch. Lines
 // are the one family still parsed and dropped.
+//
+// What is deferred is when the command is finished. The console takes
+// time over drawing — roughly the pixels it touches, more of it for a
+// texture or a blend — and everything that waits for the GPU waits on
+// that: the ready bits in GPUSTAT, and the request line the DMA
+// controller paces a display list against. So the ports take the
+// master clock, and busy_until is the answer they are all built on.
 struct Gpu {
     static constexpr u32 GP0 = 0x1F801810;
     static constexpr u32 GP1 = 0x1F801814;
@@ -82,7 +89,29 @@ struct Gpu {
     // put into VRAM by whatever decoded it.
     bool colour_24bit() const { return ((display_mode >> 4) & 1) != 0; }
 
-    u32 status() const;
+    // GPUSTAT, and the two ports either side of it. All three take
+    // the master clock because the ready bits are no longer a property
+    // of the GPU's state alone: they answer for how much of what it
+    // was given it has got through, which only a timestamp can say.
+    u32 status(u64 now) const;
+
+    // Whether the GPU is still working through what it has been
+    // handed. Drawing is not deferred — a command reaches VRAM the
+    // moment its last word arrives — but the console takes time over
+    // it, and this is that time.
+    bool drawing(u64 now) const { return now < busy_until; }
+
+    // Whether the request line the DMA controller watches is up. It is
+    // GPUSTAT bit 25, which is whichever ready bit matches the
+    // direction GP1(04h) set, and the controller asks for it directly
+    // rather than picking it back out of the status word.
+    bool dma_ready(u64 now) const;
+
+    // The two ready bits the DMA controller's handshake is made of:
+    // GPUSTAT bit 28, room on the way in, and bit 27, something
+    // waiting on the way out.
+    bool ready_for_block(u64 now) const;
+    bool ready_to_send(u64 now) const;
 
     // GP0(E1h) as it may be stored, and the part of it a textured
     // primitive brings with it.
@@ -141,9 +170,9 @@ struct Gpu {
 
     // The GPUREAD port. Returns transfer data while a VRAM-to-CPU copy
     // is in progress, and otherwise whatever GP1(10h) last asked for.
-    u32 read();
+    u32 read(u64 now);
 
-    void write_gp0(u32 word);
+    void write_gp0(u32 word, u64 now);
     void write_gp1(u32 word);
 
     // What GP0 does with the next word it is given.
@@ -247,8 +276,45 @@ struct Gpu {
     std::array<u32, COMMAND_MAX_WORDS> command{};
     u32 command_words = 0;
 
+    // When the GPU will have finished what it has been given, and how
+    // many words are queued behind that. Together they are the command
+    // FIFO: sixteen words deep, as on the chip.
+    //
+    // The queue is only ever occupied while there is something to wait
+    // for. Once the clock passes busy_until the GPU has caught up with
+    // everything handed to it, so by definition nothing is left
+    // waiting — which is why the count is emptied on the first word to
+    // arrive after that moment rather than drained word by word.
+    static constexpr u32 FIFO_WORDS = 16;
+    u64 busy_until = 0;
+    u32 fifo_words = 0;
+
+    // The part of a cycle the charges so far have not added up to. A
+    // pixel costs well under one, so a charge for two of them — which
+    // is what a VRAM readback pays, a word at a time — rounds down to
+    // nothing at all unless the remainder is kept somewhere.
+    u32 cost_owed = 0;
+
+    // Pixels the rasterizer walked over drawing the command it is on.
+    // It counts what was covered, not what came out: a pixel dropped
+    // by the mask bit or by a transparent texel was still visited, and
+    // still cost the console its time. Pixels outside the draw area
+    // are not counted, because the console does not pay for those
+    // either — gpu/bandwidth times a quad half off the screen at half
+    // the whole one.
+    u32 pixels_drawn = 0;
+
 private:
     void execute_gp0();
+
+    // Brings the clock the GPU is charged against up to the present,
+    // and puts the cost of a command onto it.
+    void catch_up(u64 now);
+    void charge(u32 pixels, u32 cost_per_pixel);
+
+    // How much of the FIFO is occupied, which is what GPUSTAT's
+    // command bit answers for.
+    u32 queued_words(u64 now) const;
 
     // Turning a collected command into the geometry the rasterizer
     // takes. All the fiddly part of a GP0 drawing command is here: how

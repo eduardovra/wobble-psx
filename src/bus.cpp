@@ -137,10 +137,10 @@ bool Bus::read_io(u32 phys, u32& value, u32 width)
         value = irq.mask;
         return true;
     case Gpu::GP0:
-        value = gpu.read();
+        value = gpu.read(scheduler.now);
         return true;
     case Gpu::GP1:
-        value = gpu.status();
+        value = gpu.status(scheduler.now);
         return true;
     default:
         break;
@@ -199,7 +199,7 @@ bool Bus::write_io(u32 phys, u32 value, u32 width)
         irq.mask = static_cast<u16>(value) & Irq::LINES;
         return true;
     case Gpu::GP0:
-        gpu.write_gp0(value);
+        gpu.write_gp0(value, scheduler.now);
         return true;
     case Gpu::GP1:
         gpu.write_gp1(value);

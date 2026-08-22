@@ -38,6 +38,45 @@ s32 sign_extend_11(u32 value)
     return static_cast<s32>(low < 0x400 ? low : low - 0x800);
 }
 
+// What the console spends on one pixel, in CPU cycles scaled by
+// PIXEL_COST_SCALE so that fractions of a cycle can be written as
+// whole numbers. Every figure is gpu/bandwidth's log divided by the
+// pixels that test covers: the flat opaque primitive is the anchor and
+// the rest are the ratios the log measures, which is why they are here
+// as measurements rather than as a formula.
+constexpr u32 PIXEL_COST_SCALE = 1024;
+
+constexpr u32 COST_FILL = 85;   // GP0(02h), which skips every stage
+constexpr u32 COST_FLAT = 552;  // one colour, straight into VRAM
+constexpr u32 COST_SEMI = 833;  // ... read back and blended first
+
+// A textured rectangle and a textured polygon are nowhere near each
+// other — twice a flat pixel against five times — and the difference
+// is the texture cache. A sprite walks its texture one texel to the
+// pixel, along the row, so almost every read is already in the cache;
+// a polygon interpolates in two dimensions and misses it constantly.
+// Modelling the cache itself is a long way beyond this, so the two
+// paths carry the cost the log gives them.
+constexpr u32 COST_TEXTURED_RECT = 1093;
+constexpr u32 COST_TEXTURED_POLY = 2889;
+
+// The three ways a pixel moves rather than being drawn. Only two of
+// them cost anything here, and that is a measurement rather than an
+// omission: a pixel coming in from the CPU arrives no faster than
+// whatever is sending it, and both dma/chopping and gpu/bandwidth put
+// a console's way in at the speed of the DMA controller alone. The
+// controller is already charged for that, so charging the GPU again
+// counts it twice — dma/chopping takes half as long again as a console
+// the moment it does.
+//
+// The way out is not the same. A console reads VRAM back close to a
+// third slower than it writes it, on the same channel at the same
+// block size, and that difference is the GPU's: the pixels have to be
+// out of VRAM before the controller has anything to move.
+constexpr u32 COST_VRAM_LOAD = 0;     // arriving from the CPU
+constexpr u32 COST_VRAM_STORE = 242;  // going back to it
+constexpr u32 COST_VRAM_COPY = 1383;  // VRAM to VRAM
+
 // The flag bits every drawing command shares, in the low five bits of
 // its command byte. Not all of them apply to every family — a
 // rectangle is never shaded across, and an untextured primitive has no
@@ -50,6 +89,18 @@ Shading shading_of(u32 op)
     how.textured = (op & 0x04) != 0;
     how.gouraud = (op & 0x10) != 0 && op < 0x60;
     return how;
+}
+
+// What a pixel of this primitive costs. Semi-transparency is only ever
+// charged for on an untextured one: a textured pixel already goes
+// through the blender to get there, and the log times the two rows to
+// the hblank.
+u32 pixel_cost(const Shading& how, bool polygon)
+{
+    if (how.textured) {
+        return polygon ? COST_TEXTURED_POLY : COST_TEXTURED_RECT;
+    }
+    return how.translucent ? COST_SEMI : COST_FLAT;
 }
 
 }  // namespace
@@ -261,6 +312,9 @@ void Gpu::visit_state(State& state)
     state(polyline_colour);
     state(polyline_next_colour);
     state(polyline_has_colour);
+    state(busy_until);
+    state(fifo_words);
+    state(cost_owed);
 }
 
 void Gpu::reset()
@@ -270,6 +324,10 @@ void Gpu::reset()
     mode = Gp0Mode::Command;
     transfer = Transfer{};
     command_words = 0;
+    busy_until = 0;
+    fifo_words = 0;
+    cost_owed = 0;
+    pixels_drawn = 0;
     draw_mode = 0;
     texture_window = 0;
     draw_area_top = 0;
@@ -341,7 +399,52 @@ void Gpu::apply_texpage(u32 attribute)
     draw_mode |= gated_draw_mode(attribute) & FROM_PRIMITIVE;
 }
 
-u32 Gpu::status() const
+// How much of the FIFO is occupied. Nothing waits behind a GPU that
+// has caught up, so a backlog only exists while it is still drawing.
+u32 Gpu::queued_words(u64 now) const { return drawing(now) ? fifo_words : 0; }
+
+// GPUSTAT bit 28. A block is sixteen words, so what it asks is not
+// whether there is room for a word but whether there is room for all
+// of them: the GPU has to have caught up.
+//
+// It answers for the way in, and nothing else. A transfer out of VRAM
+// occupies the way out: the GPU is holding pixels for the CPU to
+// collect and will still take a command or a block while it waits, so
+// this stays set throughout one. Saying otherwise hangs anything that
+// waits for the GPU after starting a read — PSn00bSDK ends every
+// DrawPrim with a DrawSync, which with DMA off is a spin on this bit
+// alone, and gpu/mask-bit never returns from its first readback.
+bool Gpu::ready_for_block(u64 now) const
+{
+    return mode == Gp0Mode::ImageStore || !drawing(now);
+}
+
+// GPUSTAT bit 27, the way out: pixels are only there to be collected
+// once the GPU has read them out of VRAM.
+bool Gpu::ready_to_send(u64 now) const
+{
+    return mode == Gp0Mode::ImageStore && !drawing(now);
+}
+
+// Bit 25, which is also the wire the DMA controller watches. Which of
+// the ready bits it repeats depends on which way GP1(04h) pointed the
+// channel.
+bool Gpu::dma_ready(u64 now) const
+{
+    switch (dma_direction) {
+    case DmaDirection::Off:
+        return false;
+    case DmaDirection::Fifo:
+        return queued_words(now) < FIFO_WORDS;
+    case DmaDirection::CpuToGp0:
+        return ready_for_block(now);
+    case DmaDirection::VramToCpu:
+        return ready_to_send(now);
+    }
+    return false;
+}
+
+u32 Gpu::status(u64 now) const
 {
     u32 value = 0;
 
@@ -372,47 +475,18 @@ u32 Gpu::status() const
     // during a transfer into VRAM the GPU genuinely is not ready for a
     // command, and says so.
     //
-    // The block bit is not the command bit repeated. A transfer into
-    // VRAM is not ready for a command precisely because it is waiting
-    // for a block, and software that uploads a picture polls this one
-    // before every block it sends — an MDEC frame reaching the screen
-    // depends on it.
-    //
-    // It answers for the way in, and nothing else. A transfer out of
-    // VRAM occupies the way out: the GPU is holding pixels for the CPU
-    // to collect and will still take a command or a block while it
-    // waits, so the block bit stays set throughout one. That leaves it
-    // set always, because what would clear it is a full command FIFO
-    // and there is no FIFO here. Saying otherwise hangs anything that
-    // waits for the GPU after starting a read — PSn00bSDK ends every
-    // DrawPrim with a DrawSync, which with DMA off is a spin on this
-    // bit alone, and gpu/mask-bit never returns from its first
-    // readback.
-    const bool ready_for_command = mode != Gp0Mode::ImageLoad;
-    const bool ready_to_send = mode == Gp0Mode::ImageStore;
-    constexpr bool ready_for_block = true;
+    // What they mostly answer for is how far behind the GPU has fallen
+    // — see the three functions above. The command bit is the one the
+    // FIFO makes worth polling: software can hand over a whole command
+    // and only then be made to wait, rather than being stopped between
+    // one word and the next.
+    const bool ready_for_command =
+        mode != Gp0Mode::ImageLoad && queued_words(now) < FIFO_WORDS;
     value |= static_cast<u32>(ready_for_command) << 26;
-    value |= static_cast<u32>(ready_to_send) << 27;
-    value |= static_cast<u32>(ready_for_block) << 28;
+    value |= static_cast<u32>(ready_to_send(now)) << 27;
+    value |= static_cast<u32>(ready_for_block(now)) << 28;
 
-    // Bit 25 answers the DMA controller's request line, and what it
-    // means depends on which way the transfer is going.
-    bool dma_request = false;
-    switch (dma_direction) {
-    case DmaDirection::Off:
-        dma_request = false;
-        break;
-    case DmaDirection::Fifo:
-        dma_request = true;  // the command FIFO is never full here
-        break;
-    case DmaDirection::CpuToGp0:
-        dma_request = ready_for_block;
-        break;
-    case DmaDirection::VramToCpu:
-        dma_request = ready_to_send;
-        break;
-    }
-    value |= static_cast<u32>(dma_request) << 25;
+    value |= static_cast<u32>(dma_ready(now)) << 25;
     value |= static_cast<u32>(dma_direction) << 29;
 
     // Bit 31 is which lines are being drawn at this instant: none
@@ -429,27 +503,70 @@ u32 Gpu::status() const
     return value;
 }
 
-u32 Gpu::read()
+u32 Gpu::read(u64 now)
 {
     if (mode != Gp0Mode::ImageStore) {
         return gpuread_latch;
     }
 
     // Two pixels to a word, the lower-addressed one in the low half.
+    catch_up(now);
     const u32 low = load_pixel();
     const u32 high = load_pixel();
+    charge(2, COST_VRAM_STORE);
     if (transfer.done()) {
         mode = Gp0Mode::Command;
     }
     return low | (high << 16);
 }
 
-void Gpu::write_gp0(u32 word)
+// Brings the clock the GPU is charged against up to the present. Work
+// only ever piles up on top of work still outstanding, so this is what
+// keeps an idle GPU from being charged from where it left off — and it
+// is where the FIFO empties, since a GPU that has caught up has
+// nothing waiting behind it.
+void Gpu::catch_up(u64 now)
 {
+    if (now < busy_until) {
+        return;
+    }
+    busy_until = now;
+    fifo_words = 0;
+}
+
+// A pixel costs a fraction of a cycle, and a transfer charges for two
+// of them at a time — so the part of a cycle left over is kept rather
+// than rounded away, and kept across an idle GPU too. Rounding it down
+// costs a VRAM readback a fifth of its time; throwing it away whenever
+// the GPU has caught up costs the readback all of it, because two
+// pixels never come to a whole cycle in the first place.
+void Gpu::charge(u32 pixels, u32 cost_per_pixel)
+{
+    const u64 owed = cost_owed + u64{pixels} * cost_per_pixel;
+    busy_until += owed / PIXEL_COST_SCALE;
+    cost_owed = static_cast<u32>(owed % PIXEL_COST_SCALE);
+}
+
+void Gpu::write_gp0(u32 word, u64 now)
+{
+    catch_up(now);
+
+    // A word arriving at a GPU that has caught up is taken straight in
+    // hand; one arriving at a GPU still drawing has to wait behind it,
+    // and that waiting is the FIFO. Software that hands over a word
+    // with it already full has ignored what GPUSTAT told it, and the
+    // console has nowhere to put that word either — so it is counted
+    // no further rather than dropped, which would desynchronise every
+    // command after it.
+    if (drawing(now)) {
+        fifo_words = std::min(fifo_words + 1, FIFO_WORDS);
+    }
+
     switch (mode) {
     case Gp0Mode::ImageLoad:
         store_pixel(static_cast<u16>(word));
         store_pixel(static_cast<u16>(word >> 16));
+        charge(2, COST_VRAM_LOAD);
         if (transfer.done()) {
             mode = Gp0Mode::Command;
         }
@@ -460,7 +577,9 @@ void Gpu::write_gp0(u32 word)
             mode = Gp0Mode::Command;
             return;
         }
+        pixels_drawn = 0;
         extend_polyline(word);
+        charge(pixels_drawn, pixel_cost(shading_of(command[0] >> 24), false));
         return;
 
     case Gp0Mode::ImageStore:
@@ -481,6 +600,7 @@ void Gpu::write_gp0(u32 word)
 void Gpu::execute_gp0()
 {
     const u32 op = command[0] >> 24;
+    pixels_drawn = 0;
 
     switch (op) {
     case 0x00:  // NOP
@@ -517,24 +637,33 @@ void Gpu::execute_gp0()
     }
 
     if (op == 0x02) {
+        const u32 width = ((command[2] & 0x3FF) + 0xF) & ~0xFu;
+        const u32 height = (command[2] >> 16) & 0x1FF;
         fill_vram(*this,
                   command[1] & 0x3F0,
                   (command[1] >> 16) & 0x1FF,
-                  ((command[2] & 0x3FF) + 0xF) & ~0xFu,
-                  (command[2] >> 16) & 0x1FF,
+                  width,
+                  height,
                   command[0] & 0xFFFFFF);
+        charge(width * height, COST_FILL);
     } else if (op >= 0x20 && op <= 0x3F) {
         draw_polygon();
+        charge(pixels_drawn, pixel_cost(shading_of(op), true));
     } else if (op >= 0x60 && op <= 0x7F) {
         draw_sprite();
+        charge(pixels_drawn, pixel_cost(shading_of(op), false));
     } else if (op >= 0x80 && op <= 0x9F) {
+        const u32 width = transfer_extent(command[3] & 0xFFFF, VRAM_WIDTH);
+        const u32 height =
+            transfer_extent((command[3] >> 16) & 0xFFFF, VRAM_HEIGHT);
         copy_vram(*this,
                   command[1] & 0x3FF,
                   (command[1] >> 16) & 0x1FF,
                   command[2] & 0x3FF,
                   (command[2] >> 16) & 0x1FF,
-                  transfer_extent(command[3] & 0xFFFF, VRAM_WIDTH),
-                  transfer_extent((command[3] >> 16) & 0xFFFF, VRAM_HEIGHT));
+                  width,
+                  height);
+        charge(width * height, COST_VRAM_COPY);
     } else if (op >= 0xA0 && op <= 0xBF) {
         begin_transfer();
         mode = Gp0Mode::ImageLoad;
@@ -543,6 +672,7 @@ void Gpu::execute_gp0()
         mode = Gp0Mode::ImageStore;
     } else if (op >= 0x40 && op <= 0x5F) {
         draw_line_command();
+        charge(pixels_drawn, pixel_cost(shading_of(op), false));
         // Bit 3 makes it a polyline: the two vertices collected are the
         // first segment, and the rest follow until the terminator.
         if ((op & 0x08) != 0) {
@@ -779,6 +909,11 @@ void Gpu::write_gp1(u32 word)
         mode = Gp0Mode::Command;
         command_words = 0;
         transfer = Transfer{};
+        // What software resets the FIFO for is to get out of a stall,
+        // so the words waiting in it go as well. The work already
+        // handed to the drawing engine does not: the console cannot
+        // un-draw it, and busy_until is when it will be finished.
+        fifo_words = 0;
         break;
     case 0x02:
         irq = false;

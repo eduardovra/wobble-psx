@@ -102,12 +102,12 @@ TEST_CASE("nothing is drawn outside the draw area")
 TEST_CASE("the draw offset moves a primitive without moving its shape")
 {
     Screen screen;
-    screen.gpu->write_gp0(0xE5000000 | (100u << 11) | 100u);
-    screen.gpu->write_gp0(0x28000000 | RED);  // a flat quad at the origin
-    screen.gpu->write_gp0(0x00000000);        // (0, 0)
-    screen.gpu->write_gp0(0x00000010);        // (16, 0)
-    screen.gpu->write_gp0(0x00100000);        // (0, 16)
-    screen.gpu->write_gp0(0x00100010);        // (16, 16)
+    screen.gpu->write_gp0(0xE5000000 | (100u << 11) | 100u, 0);
+    screen.gpu->write_gp0(0x28000000 | RED, 0);  // a flat quad at the origin
+    screen.gpu->write_gp0(0x00000000, 0);        // (0, 0)
+    screen.gpu->write_gp0(0x00000010, 0);        // (16, 0)
+    screen.gpu->write_gp0(0x00100000, 0);        // (0, 16)
+    screen.gpu->write_gp0(0x00100010, 0);        // (16, 16)
 
     CHECK(screen.at(104, 104) != 0);
     CHECK(screen.at(4, 4) == 0);
@@ -155,11 +155,11 @@ TEST_CASE("a gouraud triangle carries each corner's own colour")
 TEST_CASE("a quad covers all four of its corners")
 {
     Screen screen;
-    screen.gpu->write_gp0(0x28000000 | 0xFFFFFF);
-    screen.gpu->write_gp0(0x00000000);  // (0, 0)
-    screen.gpu->write_gp0(0x00000040);  // (64, 0)
-    screen.gpu->write_gp0(0x00400000);  // (0, 64)
-    screen.gpu->write_gp0(0x00400040);  // (64, 64)
+    screen.gpu->write_gp0(0x28000000 | 0xFFFFFF, 0);
+    screen.gpu->write_gp0(0x00000000, 0);  // (0, 0)
+    screen.gpu->write_gp0(0x00000040, 0);  // (64, 0)
+    screen.gpu->write_gp0(0x00400000, 0);  // (0, 64)
+    screen.gpu->write_gp0(0x00400040, 0);  // (64, 64)
 
     CHECK(screen.at(1, 1) == WHITE);
     CHECK(screen.at(62, 1) == WHITE);

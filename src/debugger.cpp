@@ -214,11 +214,16 @@ std::string format_devices(Console& console)
                        irq.status,
                        irq.mask,
                        irq.active() ? "yes" : "no");
+    const u64 now = console.scheduler.now;
     out += std::format("gpu  stat {:08X}  scanline {}  field {}  vblank {}\n",
-                       gpu.status(),
+                       gpu.status(now),
                        gpu.scanline,
                        gpu.odd_field ? 1 : 0,
                        gpu.in_vblank() ? "yes" : "no");
+    out += std::format("gpu  drawing {}  backlog {} cycles  fifo {}\n",
+                       gpu.drawing(now) ? "yes" : "no",
+                       gpu.drawing(now) ? gpu.busy_until - now : 0,
+                       gpu.drawing(now) ? gpu.fifo_words : 0);
     out += std::format("gpu  start {:08X}  rangex {:08X}  rangey {:08X}\n",
                        gpu.display_start,
                        gpu.display_range_x,
