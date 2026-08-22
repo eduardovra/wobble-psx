@@ -124,22 +124,20 @@ std::optional<Exe> read_exe(const std::string& path)
 
 bool run_to_shell_entry(Console& console, u64 instruction_budget)
 {
-    Cpu& cpu = console.cpu;
-    u64 executed = 0;
-    while (executed < instruction_budget && !cpu.halted) {
-        const u64 deadline = console.scheduler.next_deadline();
-        while (console.scheduler.now < deadline && !cpu.halted &&
-               executed < instruction_budget) {
-            // Checked before the step rather than after it: `pc` is
-            // the instruction about to run, so arriving is seen with
-            // the first instruction of the program still unexecuted.
-            if (cpu.pc == SHELL_ENTRY) {
-                return true;
-            }
-            console.scheduler.advance(cpu.step());
-            executed++;
+    const Cpu& cpu = console.cpu;
+    for (u64 executed = 0; executed < instruction_budget && !cpu.halted;
+         executed++) {
+        // Checked before the step rather than after it: `pc` is the
+        // instruction about to run, so arriving is seen with the first
+        // instruction of the program still unexecuted.
+        if (cpu.pc == SHELL_ENTRY) {
+            return true;
         }
-        console.dispatch_due_events();
+        // An instruction at a time, for the reason Console::run_cycles
+        // gives: the BIOS boot this walks through arms DMA transfers,
+        // and a run aimed at a deadline settled beforehand takes the
+        // CPU past the store that armed one.
+        console.step();
     }
     return false;
 }

@@ -69,10 +69,10 @@ struct DueEvent {
 // `now` is the master clock, driven forward by the CPU as it retires
 // instructions. Nothing else is stepped in lockstep with it: a device
 // that will need attention in 500,000 cycles says so, and costs
-// nothing until that moment arrives. The run loop asks for the next
-// deadline, lets the CPU run freely up to it, and only then dispatches
-// — so events land on the exact cycle they were scheduled for without
-// anything being polled per instruction.
+// nothing until that moment arrives. The run loop asks after each
+// instruction which of them have come due — a scan of a handful of
+// timestamps — so an event lands on the cycle it was scheduled for
+// without any device being stepped to reach it.
 struct Scheduler {
     Scheduler() { reset(); }
 
@@ -92,8 +92,8 @@ struct Scheduler {
     void cancel(EventKind kind);
 
     // Timestamp of the earliest pending event, or NEVER when nothing
-    // is scheduled. The run loop uses it as the limit on how long the
-    // CPU may run undisturbed.
+    // is scheduled — how far the machine can be carried before
+    // something wants attention.
     u64 next_deadline() const;
 
     // The same for one kind alone, which is how a device asks whether

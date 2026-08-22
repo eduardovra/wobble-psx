@@ -1,8 +1,10 @@
 #include <memory>
+#include <vector>
 
 #include <doctest/doctest.h>
 
 #include "bus.h"
+#include "console.h"
 #include "dma.h"
 #include "machine.h"
 
@@ -535,4 +537,67 @@ TEST_CASE("a request transfer counts its blocks down where software sees")
     CHECK((bus->read32(bcr(GPU_CHANNEL)) >> 16) == 0);
     CHECK(bus->gpu.vram[0] == 0x3333);
     CHECK(bus->gpu.vram[1] == 0x4444);
+}
+
+// A store arms a channel, and the transfer it arms wants the bus in
+// the cycles that follow the store — not whenever the run loop next
+// happens to look. Console::run_cycles used to settle on a deadline
+// before letting the CPU go, and so ran it right past the store. The
+// BIOS catches that: it sends its intro logo down a channel and
+// prints a GPU timeout when the transfer has not begun a scanline
+// later.
+//
+// What the transfer costs the CPU is what makes it visible from
+// outside. A channel holding the bus stalls the next load, so the
+// same loop gets fewer turns in the same window when the store ahead
+// of it started one.
+TEST_CASE("a transfer a store arms takes the bus inside the same window")
+{
+    using namespace mips;
+
+    constexpr u32 CODE = 0x00001000;
+    constexpr u32 WORDS = 512;
+
+    // Long enough for the program to reach its loop, short enough that
+    // the transfer is still holding the bus when it ends.
+    constexpr u64 WINDOW = 1024;
+
+    const auto turns_taken = [](u32 start_value) {
+        std::unique_ptr<Console> console = std::make_unique<Console>();
+        console->bus.write32(DPCR, ALL_CHANNELS_ENABLED);
+
+        const std::vector<u32> program = {
+            lui(t0, Dma::BASE >> 16),
+            ori(t0, t0, (Dma::BASE & 0xFFFF) + OTC_CHANNEL * 0x10),
+            lui(t1, SCRATCH >> 16),
+            sw(t1, t0, 0),  // MADR
+            addiu(t1, zero, WORDS),
+            sw(t1, t0, 4),  // BCR
+            lui(t1, static_cast<s32>(start_value >> 16)),
+            ori(t1, t1, static_cast<s32>(start_value & 0xFFFF)),
+            sw(t1, t0, 8),  // CHCR, which is what arms it
+
+            // A loop that counts its own turns, and reads RAM each
+            // time round so that a channel with the bus is felt.
+            lw(t2, zero, SCRATCH),
+            addiu(t3, t3, 1),
+            beq(zero, zero, -3),
+            nop(),
+        };
+        u32 address = CODE;
+        for (const u32 instruction : program) {
+            console->bus.write32(address, instruction);
+            address += 4;
+        }
+        console->cpu.pc = CODE;
+        console->cpu.next_pc = CODE + 4;
+        console->cpu.current_pc = CODE;
+
+        console->run_until_frame(WINDOW);
+        CHECK((console->bus.read32(SCRATCH) != 0) ==
+              (start_value != DECREASING));
+        return console->cpu.regs[t3];
+    };
+
+    CHECK(turns_taken(START | DECREASING) < turns_taken(DECREASING));
 }

@@ -38,10 +38,15 @@ struct Console {
     u32 step();
 
     // Runs until `cycles` of emulated time have passed, or the CPU
-    // halts. The CPU is let loose only as far as the next deadline, so
-    // an event lands on the exact cycle it asked for rather than
-    // whenever the loop next looks.
-    void run_cycles(u64 cycles);
+    // halts, or the console finishes a frame — whichever comes first.
+    // Returns true if it was the frame, which is what tells a caller
+    // that the picture is a whole one and worth showing.
+    //
+    // Nothing but the stopping conditions separates this from calling
+    // step() until they are met, and that is the point: a window and a
+    // debugger holding the same console must get the same machine out
+    // of it.
+    bool run_until_frame(u64 cycles);
 
     // Everything a scheduled event does, which for now is the video
     // signal advancing a line and vertical blank falling out of it.

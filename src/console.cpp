@@ -1,7 +1,5 @@
 #include "console.h"
 
-#include <algorithm>
-
 #include "cdrom.h"
 #include "dma.h"
 #include "gpu.h"
@@ -106,16 +104,28 @@ u32 Console::step()
     return cycles;
 }
 
-void Console::run_cycles(u64 cycles)
+bool Console::run_until_frame(u64 cycles)
 {
+    // An instruction at a time, with everything it made due dispatched
+    // before the next one — which is to say, exactly what a caller
+    // stepping the machine itself gets.
+    //
+    // The deadline cannot be worked out once and run up to. A store
+    // schedules: writing a DMA channel's control register arms a
+    // transfer that wants the bus this cycle, and a run heading for a
+    // deadline settled before the store would carry the CPU straight
+    // past it. The BIOS notices — it sends the intro logo down a
+    // channel, watches for it to be taken, and prints a GPU timeout
+    // when the answer comes a scanline late.
     const u64 end = scheduler.now + cycles;
+    const u64 frame = frames;
     while (scheduler.now < end && !cpu.halted) {
-        const u64 deadline = std::min(end, scheduler.next_deadline());
-        while (scheduler.now < deadline && !cpu.halted) {
-            scheduler.advance(cpu.step());
+        step();
+        if (frames != frame) {
+            return true;
         }
-        dispatch_due_events();
     }
+    return false;
 }
 
 void Console::visit_state(State& state)

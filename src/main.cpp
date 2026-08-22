@@ -158,6 +158,13 @@ struct Display {
     SDL_Texture* texture = nullptr;
     std::vector<u32> pixels;
 
+    // The picture held in `pixels`: its shape, and whether there is
+    // one at all. A blanked GPU puts out no picture, which is a black
+    // screen rather than the last thing that was drawn.
+    int width = 0;
+    int height = 0;
+    bool blank = true;
+
     bool create(SDL_Renderer* renderer)
     {
         texture = SDL_CreateTexture(renderer,
@@ -232,43 +239,59 @@ SDL_FRect fit_into(const SDL_FRect& region)
             height};
 }
 
+// Takes a copy of what the GPU is putting out. Kept apart from
+// showing it because when the copy is taken is the whole question: a
+// game draws over the frame it is displaying and has it finished by
+// vertical blank, so a copy taken part-way through one is part-drawn.
+// The BIOS fades its logo in through a single buffer, and copying it
+// wherever a host frame happened to land caught it cleared but not yet
+// redrawn — a black frame every dozen or so, which is a flicker.
+void capture_display(Display& display, const Gpu& gpu)
+{
+    display.blank = gpu.display_disabled;
+    if (display.blank) {
+        return;
+    }
+
+    display.width = std::min<int>(static_cast<int>(gpu.display_width()),
+                                  Display::MAX_WIDTH);
+    display.height = std::min<int>(static_cast<int>(gpu.display_height()),
+                                   Display::MAX_HEIGHT);
+
+    for (int y = 0; y < display.height; y++) {
+        for (int x = 0; x < display.width; x++) {
+            const Gpu::Colour colour =
+                gpu.display_pixel(static_cast<u32>(x), static_cast<u32>(y));
+            const std::size_t index =
+                std::size_t{static_cast<u32>(y)} * display.width + x;
+            display.pixels[index] =
+                (u32{colour.r} << 16) | (u32{colour.g} << 8) | colour.b;
+        }
+    }
+}
+
 void present_display(SDL_Renderer* renderer,
                      Display& display,
-                     const Gpu& gpu,
                      const SDL_FRect& region)
 {
     const SDL_FRect area = fit_into(region);
 
-    // A blanked GPU puts out no picture at all, which is a black
-    // screen rather than the last thing that was drawn.
-    if (gpu.display_disabled) {
+    if (display.blank || display.width == 0 || display.height == 0) {
         SDL_SetRenderDrawColor(renderer, 0, 0, 0, 255);
         SDL_RenderFillRect(renderer, &area);
         return;
     }
 
-    const int width = std::min<int>(static_cast<int>(gpu.display_width()),
-                                    Display::MAX_WIDTH);
-    const int height = std::min<int>(static_cast<int>(gpu.display_height()),
-                                     Display::MAX_HEIGHT);
-
-    for (int y = 0; y < height; y++) {
-        for (int x = 0; x < width; x++) {
-            const Gpu::Colour colour =
-                gpu.display_pixel(static_cast<u32>(x), static_cast<u32>(y));
-            display.pixels[std::size_t{static_cast<u32>(y)} * width + x] =
-                (u32{colour.r} << 16) | (u32{colour.g} << 8) | colour.b;
-        }
-    }
-
-    const SDL_Rect uploaded = {0, 0, width, height};
+    const SDL_Rect uploaded = {0, 0, display.width, display.height};
     SDL_UpdateTexture(display.texture,
                       &uploaded,
                       display.pixels.data(),
-                      width * static_cast<int>(sizeof(u32)));
+                      display.width * static_cast<int>(sizeof(u32)));
 
-    const SDL_FRect source = {
-        0, 0, static_cast<float>(width), static_cast<float>(height)};
+    const SDL_FRect source = {0,
+                              0,
+                              static_cast<float>(display.width),
+                              static_cast<float>(display.height)};
     SDL_RenderTexture(renderer, display.texture, &source, &area);
 }
 
@@ -524,7 +547,28 @@ int main(int argc, char** argv)
         }
 
         if (emu_running) {
-            console.run_cycles(CYCLES_PER_HOST_FRAME);
+            // A fixed slice of console time per host frame is what
+            // keeps the machine running at its own speed whatever the
+            // window is doing. Where in the console's frame that slice
+            // ends is nobody's business but the picture's, so the
+            // slice is run a frame at a time and the picture taken
+            // each time one is finished. A slice ending mid-frame
+            // leaves the last finished picture standing, which is what
+            // a television would still be showing.
+            u64 owed = CYCLES_PER_HOST_FRAME;
+            while (owed > 0 && !console.cpu.halted) {
+                const u64 before = console.scheduler.now;
+                const bool finished = console.run_until_frame(owed);
+                owed -= std::min(owed, console.scheduler.now - before);
+                if (finished) {
+                    capture_display(display, console.bus.gpu);
+                }
+            }
+        } else {
+            // Paused, the picture is whatever is there now: someone
+            // stepping an instruction at a time is watching for what
+            // that instruction did.
+            capture_display(display, console.bus.gpu);
         }
         if (audio != nullptr) {
             push_audio(audio, console.bus.spu);
@@ -547,7 +591,7 @@ int main(int argc, char** argv)
         ImGui::Render();
         SDL_SetRenderDrawColor(renderer, 30, 30, 30, 255);
         SDL_RenderClear(renderer);
-        present_display(renderer, display, console.bus.gpu, region);
+        present_display(renderer, display, region);
         ImGui_ImplSDLRenderer3_RenderDrawData(ImGui::GetDrawData(), renderer);
         SDL_RenderPresent(renderer);
     }
