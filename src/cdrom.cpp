@@ -77,6 +77,18 @@ constexpr u8 MODE_WHOLE_SECTOR = 1 << 5;
 constexpr u8 MODE_XA_ADPCM = 1 << 6;
 constexpr u8 MODE_DOUBLE_SPEED = 1 << 7;
 
+// The four volume registers, in the order they are held in: how much
+// of each channel of the disc reaches each channel of the output.
+constexpr u32 VOLUME_LEFT_TO_LEFT = 0;
+constexpr u32 VOLUME_LEFT_TO_RIGHT = 1;
+constexpr u32 VOLUME_RIGHT_TO_RIGHT = 2;
+constexpr u32 VOLUME_RIGHT_TO_LEFT = 3;
+
+// The register beside them: whether the compressed sound is muted,
+// and the bit that says the four volumes have all been written.
+constexpr u8 ADPCM_MUTE = 1 << 0;
+constexpr u8 ADPCM_APPLY_VOLUME = 1 << 5;
+
 // Bits of a sector's submode, the third byte of its subheader. A
 // movie's sound is all three at once: compressed audio, written in the
 // larger of the two sector forms because it needs the room and can
@@ -84,6 +96,151 @@ constexpr u8 MODE_DOUBLE_SPEED = 1 << 7;
 constexpr u8 SUBMODE_AUDIO = 1 << 2;
 constexpr u8 SUBMODE_FORM_2 = 1 << 5;
 constexpr u8 SUBMODE_REALTIME = 1 << 6;
+
+// XA-ADPCM, which is what a movie's sound is compressed with. A Form 2
+// sector carries eighteen 128-byte sound groups; each is sixteen bytes
+// of filter and shift followed by twenty-eight four-byte words, and
+// each word carries one sample for every block the group holds — eight
+// of them at four bits, four at eight bits. So a block's samples are
+// not consecutive in the sector: they are one nibble of each word in
+// turn.
+constexpr u32 SOUND_GROUPS = 18;
+constexpr u32 SOUND_GROUP_SIZE = 128;
+constexpr u32 GROUP_HEADER_SIZE = 16;
+constexpr u32 SAMPLES_PER_BLOCK = 28;
+constexpr u32 WORD_SIZE = 4;
+
+// The fourth byte of the subheader says how the sound was written.
+constexpr u8 CODING_STEREO = 1 << 0;
+constexpr u8 CODING_HALF_RATE = 1 << 2;
+constexpr u8 CODING_EIGHT_BIT = 1 << 4;
+
+// A block's header byte: how far to shift the samples down, and which
+// of the four filters to predict with. There are four here and five in
+// the SPU, which is the one thing about this compression that is not
+// the voices'.
+constexpr u8 BLOCK_SHIFT_MASK = 0x0F;
+constexpr u32 BLOCK_FILTER_COUNT = 4;
+
+// Shifts above twelve are reserved, and the hardware reads them all as
+// nine rather than as themselves.
+constexpr u32 MAX_SHIFT = 12;
+constexpr u32 RESERVED_SHIFT = 9;
+
+// The filter, in sixty-fourths of the two samples before.
+constexpr std::array<s32, BLOCK_FILTER_COUNT> FILTER_OLD = {0, 60, 115, 98};
+constexpr std::array<s32, BLOCK_FILTER_COUNT> FILTER_OLDER = {0, 0, -52, -55};
+
+// The zigzag filter the drive resamples with, one column per output
+// sample of the seven it makes from every six, twenty-nine taps back
+// through what it has decoded. It is written the way the hardware's
+// tables are — a row per tap — so that it can be read against them.
+constexpr u32 ZIGZAG_TAPS = 29;
+constexpr s32 ZIGZAG_UNIT = 0x8000;
+constexpr std::array<std::array<s32, CdRom::RESAMPLE_STEPS>, ZIGZAG_TAPS>
+    ZIGZAG = {{
+        {0, 0, 0, 0, -0x0001, 0x0002, -0x0005},
+        {0, 0, 0, -0x0001, 0x0003, -0x0008, 0x0011},
+        {0, 0, -0x0001, 0x0003, -0x0008, 0x0010, -0x0023},
+        {0, -0x0002, 0x0003, -0x0008, 0x0011, -0x0023, 0x0046},
+        {0, 0, -0x0002, 0x0006, -0x0010, 0x002B, -0x0017},
+        {-0x0002, 0x0003, -0x0005, 0x0005, 0x000A, 0x001A, -0x0044},
+        {0x000A, -0x0013, 0x001F, -0x001B, 0x006B, -0x00EB, 0x015B},
+        {-0x0022, 0x003C, -0x004A, 0x00A6, -0x016D, 0x027B, -0x0347},
+        {0x0041, -0x004B, 0x00B3, -0x01A8, 0x0350, -0x0548, 0x080E},
+        {-0x0054, 0x00A2, -0x0192, 0x0372, -0x0623, 0x0AFA, -0x1249},
+        {0x0034, -0x00E3, 0x02B1, -0x05BF, 0x0BCD, -0x16FA, 0x3C07},
+        {0x0009, 0x0132, -0x039E, 0x09B8, -0x1780, 0x53E0, 0x53E0},
+        {-0x010A, -0x0043, 0x04F8, -0x11B4, 0x6794, 0x3C07, -0x16FA},
+        {0x0400, -0x0267, -0x05A6, 0x74BB, 0x234C, -0x1249, 0x0AFA},
+        {-0x0A78, 0x0C9D, 0x7939, 0x0C9D, -0x0A78, 0x080E, -0x0548},
+        {0x234C, 0x74BB, -0x05A6, -0x0267, 0x0400, -0x0347, 0x027B},
+        {0x6794, -0x11B4, 0x04F8, -0x0043, -0x010A, 0x015B, -0x00EB},
+        {-0x1780, 0x09B8, -0x039E, 0x0132, 0x0009, -0x0044, 0x001A},
+        {0x0BCD, -0x05BF, 0x02B1, -0x00E3, 0x0034, -0x0017, 0x002B},
+        {-0x0623, 0x0372, -0x0192, 0x00A2, -0x0054, 0x0046, -0x0023},
+        {0x0350, -0x01A8, 0x00B3, -0x004B, 0x0041, -0x0023, 0x0010},
+        {-0x016D, 0x00A6, -0x004A, 0x003C, -0x0022, 0x0011, -0x0008},
+        {0x006B, -0x001B, 0x001F, -0x0013, 0x000A, -0x0005, 0x0002},
+        {0x000A, 0x0005, -0x0005, 0x0003, -0x0001, 0, 0},
+        {-0x0010, 0x0006, -0x0002, 0, 0, 0, 0},
+        {0x0011, -0x0008, 0x0003, -0x0002, 0x0001, 0, 0},
+        {-0x0008, 0x0003, -0x0001, 0, 0, 0, 0},
+        {0x0003, -0x0001, 0, 0, 0, 0, 0},
+        {-0x0001, 0, 0, 0, 0, 0, 0},
+    }};
+
+// The drive's own volume registers are 128ths, and go up to twice
+// unity — which is why they are applied wider than they are written
+// and then clamped.
+constexpr u32 VOLUME_SHIFT = 7;
+
+s16 clamp_sample(s32 value)
+{
+    return static_cast<s16>(std::clamp(value, -0x8000, 0x7FFF));
+}
+
+// Twenty-eight samples of one channel, out of one block of a sound
+// group. The two samples before them come in and the last two go back
+// out, since the next block of the same channel continues from here.
+void decode_block(const u8* group,
+                  u32 block,
+                  bool eight_bit,
+                  s32& old,
+                  s32& older,
+                  std::array<s16, SAMPLES_PER_BLOCK>& out)
+{
+    // The sixteen header bytes are eight bytes written twice, so that
+    // a drive which read one of them badly has the other to fall back
+    // on. The eight that are read live at 4 to 11; the ones on either
+    // side of them are the copies.
+    const u8 header = group[4 + block];
+
+    u32 shift = header & BLOCK_SHIFT_MASK;
+    if (shift > MAX_SHIFT) {
+        shift = RESERVED_SHIFT;
+    }
+    const u32 filter = (header >> 4) & (BLOCK_FILTER_COUNT - 1);
+
+    for (u32 i = 0; i < SAMPLES_PER_BLOCK; i++) {
+        // A sample is widened to sixteen bits and then shifted back
+        // down by however much the block was scaled by, which is what
+        // makes four bits carry a signal with any range at all.
+        u16 widened = 0;
+        if (eight_bit) {
+            widened = static_cast<u16>(
+                group[GROUP_HEADER_SIZE + block + i * WORD_SIZE] << 8);
+        } else {
+            const u8 packed =
+                group[GROUP_HEADER_SIZE + (block / 2) + i * WORD_SIZE];
+            const u8 nibble = (packed >> ((block & 1) * 4)) & 0x0F;
+            widened = static_cast<u16>(nibble << 12);
+        }
+        const s32 scaled = static_cast<s16>(widened) >> shift;
+
+        const s32 predicted =
+            (old * FILTER_OLD[filter] + older * FILTER_OLDER[filter] + 32) / 64;
+        const s32 sample = std::clamp(scaled + predicted, -0x8000, 0x7FFF);
+
+        out[i] = static_cast<s16>(sample);
+        older = old;
+        old = sample;
+    }
+}
+
+// One output sample: the last twenty-nine decoded ones, weighted by
+// the column of the table this step of the six is up to.
+s16 zigzag(const std::array<s16, CdRom::RESAMPLE_RING>& ring,
+           u32 position,
+           u32 step)
+{
+    s32 sum = 0;
+    for (u32 tap = 1; tap <= ZIGZAG_TAPS; tap++) {
+        const s16 sample = ring[(position - tap) % CdRom::RESAMPLE_RING];
+        sum += sample * ZIGZAG[tap - 1][step] / ZIGZAG_UNIT;
+    }
+    return clamp_sample(sum);
+}
 
 // A sector from the header on, which is what the mode bit above asks
 // for when it wants more than the payload.
@@ -191,6 +348,11 @@ void CdRom::reset()
     sector = {};
     data_cursor = 0;
     data_end = 0;
+    muted = false;
+    xa_muted = false;
+    volume_written = {VOLUME_UNITY, 0, VOLUME_UNITY, 0};
+    volume = volume_written;
+    stop_audio();
 }
 
 void CdRom::visit_state(State& state)
@@ -225,6 +387,19 @@ void CdRom::visit_state(State& state)
     state(sector);
     state(data_cursor);
     state(data_end);
+    state(muted);
+    state(xa_muted);
+    state(volume_written);
+    state(volume);
+    state(adpcm_old);
+    state(adpcm_older);
+    state(resample_left);
+    state(resample_right);
+    state(resample_position);
+    state(six_step);
+    state(audio);
+    state(decoded);
+    state(played);
 }
 
 u64 CdRom::cycles_per_sector() const
@@ -343,6 +518,9 @@ void CdRom::advance_read(u64 cycles)
     // picture otherwise, which is what makes a movie fail to decode
     // rather than merely fail to play.
     if (is_audio_sector(incoming)) {
+        if (matches_filter(incoming)) {
+            decode_audio(incoming);
+        }
         return;
     }
 
@@ -359,29 +537,145 @@ bool CdRom::is_audio_sector(
         return false;
     }
 
+    // Sound on a stream the filter does not name is still the sound
+    // hardware's rather than software's: it is dropped there instead
+    // of being played, which is what `matches_filter` decides.
     const u8 submode = raw[Disc::SUBHEADER_OFFSET + 2];
     const u8 wanted = SUBMODE_AUDIO | SUBMODE_REALTIME | SUBMODE_FORM_2;
-    if ((submode & wanted) != wanted) {
-        return false;
-    }
+    return (submode & wanted) == wanted;
+}
 
-    // With the filter on, sound on any other stream is not this
-    // movie's and is dropped rather than played — which still keeps it
-    // away from software either way.
-    if ((mode & MODE_XA_FILTER) != 0) {
-        const u8 file = raw[Disc::SUBHEADER_OFFSET];
-        const u8 channel = raw[Disc::SUBHEADER_OFFSET + 1];
-        if (file != filter_file || channel != filter_channel) {
-            return true;
+bool CdRom::matches_filter(
+    const std::array<u8, Disc::RAW_SECTOR_SIZE>& raw) const
+{
+    if ((mode & MODE_XA_FILTER) == 0) {
+        return true;
+    }
+    const u8 file = raw[Disc::SUBHEADER_OFFSET];
+    const u8 channel = raw[Disc::SUBHEADER_OFFSET + 1];
+    return file == filter_file && channel == filter_channel;
+}
+
+void CdRom::decode_audio(const std::array<u8, Disc::RAW_SECTOR_SIZE>& raw)
+{
+    const u8 coding = raw[Disc::SUBHEADER_OFFSET + 3];
+    const bool stereo = (coding & CODING_STEREO) != 0;
+    const bool eight_bit = (coding & CODING_EIGHT_BIT) != 0;
+    const bool half_rate = (coding & CODING_HALF_RATE) != 0;
+
+    // Eight blocks to a group at four bits, four at eight, and in
+    // stereo they alternate between the channels: a pair of blocks is
+    // one stretch of time, not two.
+    const u32 blocks = eight_bit ? 4 : 8;
+    const u32 step = stereo ? 2 : 1;
+
+    std::array<s16, SAMPLES_PER_BLOCK> left{};
+    std::array<s16, SAMPLES_PER_BLOCK> right{};
+
+    for (u32 group_index = 0; group_index < SOUND_GROUPS; group_index++) {
+        const u8* group =
+            &raw[Disc::MODE2_DATA_OFFSET + group_index * SOUND_GROUP_SIZE];
+
+        for (u32 block = 0; block < blocks; block += step) {
+            decode_block(
+                group, block, eight_bit, adpcm_old[0], adpcm_older[0], left);
+            if (stereo) {
+                decode_block(group,
+                             block + 1,
+                             eight_bit,
+                             adpcm_old[1],
+                             adpcm_older[1],
+                             right);
+            }
+
+            for (u32 i = 0; i < SAMPLES_PER_BLOCK; i++) {
+                // Mono is played down both channels rather than down
+                // one: a movie recorded in mono is not a movie that
+                // comes out of the left speaker.
+                const s16 other = stereo ? right[i] : left[i];
+                resample(left[i], other);
+                if (half_rate) {
+                    resample(left[i], other);
+                }
+            }
         }
     }
+}
 
-    // Nothing plays it yet: the decoder for this compression and the
-    // mixer that would fold it in beside the voices are both still
-    // missing, and are noted where they would have gone in the sound
-    // processor. What matters here is that it is the sound hardware's
-    // sector and not software's.
-    return true;
+void CdRom::resample(s16 left, s16 right)
+{
+    resample_left[resample_position % RESAMPLE_RING] = left;
+    resample_right[resample_position % RESAMPLE_RING] = right;
+    resample_position++;
+
+    // Six samples in, seven out: the drive holds its decoded output in
+    // a ring and interpolates across it whenever six more have gone
+    // in, which is what turns the disc's rate into the mixer's.
+    six_step--;
+    if (six_step != 0) {
+        return;
+    }
+    six_step = SIX_STEP;
+
+    for (u32 step = 0; step < RESAMPLE_STEPS; step++) {
+        queue_audio(zigzag(resample_left, resample_position, step),
+                    zigzag(resample_right, resample_position, step));
+    }
+}
+
+void CdRom::queue_audio(s16 left, s16 right)
+{
+    // A drive further ahead of the mixer than the queue is deep is one
+    // being fed sound faster than it can be heard, which no stream
+    // written to be played at the speed it is read does. Dropping what
+    // will not fit keeps what is already queued playing in order
+    // rather than skipping backwards through it.
+    if (decoded - played >= AUDIO_CAPACITY) {
+        return;
+    }
+    audio[decoded % AUDIO_CAPACITY] = {left, right};
+    decoded++;
+}
+
+CdRom::Audio CdRom::take_audio()
+{
+    if (played >= decoded) {
+        return {};
+    }
+
+    const Audio frame = audio[played % AUDIO_CAPACITY];
+    played++;
+
+    // Muting silences the output rather than stopping the decoder, so
+    // a movie muted halfway through comes back where it has got to and
+    // not where it left off.
+    if (muted || xa_muted) {
+        return {};
+    }
+
+    // The drive's own mixer: each channel of the disc reaches each
+    // channel of the output by however much software asked for, which
+    // is how a game plays a stereo movie in mono, or fades one out
+    // without touching the SPU.
+    const s32 left =
+        (frame.left * volume[0] + frame.right * volume[3]) >> VOLUME_SHIFT;
+    const s32 right =
+        (frame.right * volume[2] + frame.left * volume[1]) >> VOLUME_SHIFT;
+    return {clamp_sample(left), clamp_sample(right)};
+}
+
+u32 CdRom::audio_ready() const { return static_cast<u32>(decoded - played); }
+
+void CdRom::stop_audio()
+{
+    decoded = 0;
+    played = 0;
+    adpcm_old = {};
+    adpcm_older = {};
+    resample_left = {};
+    resample_right = {};
+    resample_position = 0;
+    six_step = SIX_STEP;
 }
 
 void CdRom::load_header()
@@ -432,6 +726,7 @@ void CdRom::open_shell()
     header_valid = false;
     data_cursor = 0;
     data_end = 0;
+    stop_audio();
 
     // The disc is still turning for a moment yet, and the status byte
     // says so until it has wound down.
@@ -460,6 +755,7 @@ void CdRom::lose_position()
     reading = false;
     seeking = false;
     header_valid = false;
+    stop_audio();
     set_status(STATUS_SEEK_ERROR);
 }
 
@@ -525,6 +821,10 @@ void CdRom::execute(u8 command)
 
     case MUTE:
     case DEMUTE:
+        // Both the disc's own tracks and a movie's compressed sound,
+        // which is the difference between this and the mute bit
+        // beside the volume registers.
+        muted = command == MUTE;
         answer(INT_ACKNOWLEDGE, {status}, ACKNOWLEDGE_CYCLES);
         break;
 
@@ -627,6 +927,7 @@ void CdRom::execute(u8 command)
         mode = 0;
         reading = false;
         seeking = false;
+        stop_audio();
         set_status(STATUS_MOTOR);
         answer(INT_ACKNOWLEDGE, {status}, ACKNOWLEDGE_CYCLES);
         answer(INT_COMPLETE, {status}, INIT_CYCLES);
@@ -640,6 +941,10 @@ void CdRom::execute(u8 command)
         answer(INT_ACKNOWLEDGE, {status}, ACKNOWLEDGE_CYCLES);
         reading = false;
         seeking = false;
+        // Sound already decoded is dropped rather than played out: a
+        // movie the game has stopped must stop being heard, and a
+        // third of a second of it is long enough to notice.
+        stop_audio();
         status = static_cast<u8>(status & ~(STATUS_READING | STATUS_SEEKING));
         if (command == STOP) {
             status = static_cast<u8>(status & ~STATUS_MOTOR);
@@ -849,9 +1154,9 @@ void CdRom::write_register(u32 phys, u8 value)
         if (index == 0) {
             busy = true;
             execute(value);
+        } else if (index == 3) {
+            volume_written[VOLUME_RIGHT_TO_RIGHT] = value;
         }
-        // The other indices are the audio path into the SPU, which
-        // there is nothing to hear from yet.
         return;
 
     case 2:
@@ -859,6 +1164,10 @@ void CdRom::write_register(u32 phys, u8 value)
             parameters[parameter_count++] = value;
         } else if (index == 1) {
             interrupt_enable = value & FLAG_MASK;
+        } else if (index == 2) {
+            volume_written[VOLUME_LEFT_TO_LEFT] = value;
+        } else if (index == 3) {
+            volume_written[VOLUME_RIGHT_TO_LEFT] = value;
         }
         return;
 
@@ -893,8 +1202,17 @@ void CdRom::write_register(u32 phys, u8 value)
             if ((value & FLAG_RESET_PARAMETERS) != 0) {
                 parameter_count = 0;
             }
+        } else if (index == 2) {
+            volume_written[VOLUME_LEFT_TO_RIGHT] = value;
+        } else if (index == 3) {
+            // The volume registers are four separate bytes and one
+            // change: nothing software writes to them is heard until
+            // it says here that it has finished writing them.
+            xa_muted = (value & ADPCM_MUTE) != 0;
+            if ((value & ADPCM_APPLY_VOLUME) != 0) {
+                volume = volume_written;
+            }
         }
-        // Indices 2 and 3 are more of the audio path.
         return;
 
     default:

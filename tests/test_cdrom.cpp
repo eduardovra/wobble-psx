@@ -114,7 +114,11 @@ struct Image {
             raw[Disc::SUBHEADER_OFFSET + 1] = CHANNEL;
             raw[Disc::SUBHEADER_OFFSET + 2] =
                 sound ? SUBMODE_SOUND : SUBMODE_DATA;
-            raw[Disc::SUBHEADER_OFFSET + 3] = 0;
+            raw[Disc::SUBHEADER_OFFSET + 3] = sound ? CODING_STEREO : 0;
+
+            if (sound) {
+                write_sound(raw);
+            }
 
             file.write(raw.data(), static_cast<std::streamsize>(raw.size()));
         }
@@ -124,6 +128,44 @@ struct Image {
     static constexpr char CHANNEL = 2;
     static constexpr char SUBMODE_DATA = 0x08;
     static constexpr char SUBMODE_SOUND = 0x64;
+
+    // Stereo, 37800 Hz, four bits to the sample: the way a movie's
+    // sound is nearly always written.
+    static constexpr char CODING_STEREO = 0x01;
+
+    // The sound itself, which is as simple as XA-ADPCM gets: every
+    // block scaled by nothing and predicted from nothing, so each
+    // sample is the nibble it was written as, shifted up to fill a
+    // halfword. The left channel's nibble is 7 and the right's is 2,
+    // which makes a steady tone in each and tells the two apart.
+    static constexpr char GROUP_HEADER = 0x00;  // shift 0, filter 0
+    static constexpr char PACKED_SAMPLES = 0x27;
+    static constexpr s16 LEFT_SAMPLE = 0x7000;
+    static constexpr s16 RIGHT_SAMPLE = 0x2000;
+
+    // Eighteen 128-byte groups to a sector, each sixteen bytes of
+    // header and 112 of samples.
+    static constexpr u32 SOUND_GROUPS = 18;
+    static constexpr u32 SOUND_GROUP_SIZE = 128;
+    static constexpr u32 GROUP_HEADER_SIZE = 16;
+
+    // What that decodes to at the rate the mixer asks at: a sector is
+    // 2016 frames of 37800 Hz sound, and seven come out of every six.
+    static constexpr u32 FRAMES_PER_SECTOR = 2352;
+
+    static void write_sound(std::vector<char>& raw)
+    {
+        for (u32 group = 0; group < SOUND_GROUPS; group++) {
+            const u32 start =
+                Disc::MODE2_DATA_OFFSET + group * SOUND_GROUP_SIZE;
+            for (u32 i = 0; i < GROUP_HEADER_SIZE; i++) {
+                raw[start + i] = GROUP_HEADER;
+            }
+            for (u32 i = GROUP_HEADER_SIZE; i < SOUND_GROUP_SIZE; i++) {
+                raw[start + i] = PACKED_SAMPLES;
+            }
+        }
+    }
 
     ~Image() { std::filesystem::remove_all(directory); }
 
@@ -512,4 +554,236 @@ TEST_CASE("a disc changed while the lid is open is the one read after it")
     drive.command(0x14, {0x00});
     drive.advance(LONG_ENOUGH);
     CHECK(drive.answer() == std::vector<u8>{0x10, 0x00, 0x04});
+}
+
+namespace {
+
+// Starts a movie: the mode bit that sends sound to the hardware, the
+// head aimed at the first sector of it, and a read running.
+void play_movie(const Drive& drive, u8 mode)
+{
+    drive.command(0x0E, {mode});  // Setmode
+    drive.advance(LONG_ENOUGH);
+    drive.acknowledge();
+
+    drive.command(0x02, {0x00, 0x02, 0x08});  // Setloc, sector 8
+    drive.advance(LONG_ENOUGH);
+    drive.acknowledge();
+
+    drive.command(0x1B);  // ReadS
+    drive.advance(LONG_ENOUGH);
+    drive.acknowledge();
+}
+
+// Lets the drive read for long enough to pass over the sound sectors,
+// collecting the sectors software is offered so the read keeps moving.
+void read_past_the_sound(const Drive& drive, u32 sectors)
+{
+    for (u32 collected = 0; collected < sectors;) {
+        drive.advance(UNDER_A_SECTOR);
+        if (drive.pending() == 1) {
+            drive.acknowledge();
+            collected++;
+        }
+    }
+}
+
+// Everything the drive has decoded and not yet been asked for, in the
+// order it would be heard.
+std::vector<CdRom::Audio> take_sound(const Drive& drive)
+{
+    CdRom& cdrom = drive.console->bus.cdrom;
+    std::vector<CdRom::Audio> frames;
+    while (cdrom.audio_ready() > 0) {
+        frames.push_back(cdrom.take_audio());
+    }
+    return frames;
+}
+
+// Sound sectors woven through the sectors from 9 on, the way a movie
+// is written: one in every two, so a read of any length passes some.
+std::vector<u32> woven_sound()
+{
+    std::vector<u32> sectors;
+    for (u32 lba = 9; lba < 40; lba += 2) {
+        sectors.push_back(lba);
+    }
+    return sectors;
+}
+
+// The steady part of a decoded tone, past the samples the resampler
+// spends catching up with a signal that starts out of nothing.
+constexpr u32 SETTLED = 128;
+
+// What one of the image's samples comes back as. The drive's filter
+// loses about a tenth of a constant signal, which is the filter being
+// the hardware's rather than an ideal one.
+constexpr double RESAMPLE_GAIN = 0.906;
+
+}  // namespace
+
+TEST_CASE("a movie's sound is decoded and handed to the mixer")
+{
+    const Image image(64, {9, 11, 13});
+    const Drive drive;
+    REQUIRE(drive.console->bus.cdrom.disc.load(image.path));
+
+    play_movie(drive, 0x40);  // XA-ADPCM, no filter
+    read_past_the_sound(drive, 4);
+
+    const std::vector<CdRom::Audio> frames = take_sound(drive);
+    REQUIRE(frames.size() > SETTLED);
+
+    // A steady tone in each channel, and a different one in each: the
+    // decoder read the nibbles it was given, and read the two channels
+    // out of the halves of the same byte rather than mixing them.
+    const double left = Image::LEFT_SAMPLE * RESAMPLE_GAIN;
+    const double right = Image::RIGHT_SAMPLE * RESAMPLE_GAIN;
+    for (u32 i = SETTLED; i < frames.size(); i++) {
+        CHECK(frames[i].left == doctest::Approx(left).epsilon(0.01));
+        CHECK(frames[i].right == doctest::Approx(right).epsilon(0.01));
+    }
+}
+
+TEST_CASE("a sound sector is a sector of sound, however long it takes to hear")
+{
+    // The rate is the mixer's and not the drive's: a sector holds a
+    // twentieth of a second of sound however fast it was read, and it
+    // is heard over that twentieth.
+    const Image image(64, {9});
+    const Drive drive;
+    REQUIRE(drive.console->bus.cdrom.disc.load(image.path));
+
+    play_movie(drive, 0x40);
+    read_past_the_sound(drive, 2);
+
+    // The mixer has been taking a frame a sample all along, so what
+    // the drive has decoded is counted rather than what is left.
+    CHECK(drive.console->bus.cdrom.decoded == Image::FRAMES_PER_SECTOR);
+}
+
+TEST_CASE("sound on another stream is dropped rather than played")
+{
+    const Image image(64, {9, 11});
+    const Drive drive;
+    REQUIRE(drive.console->bus.cdrom.disc.load(image.path));
+
+    // The filter on, naming a channel the disc does not carry. The
+    // sectors are still the sound hardware's — software is never
+    // offered them — but they are not this movie's sound.
+    drive.command(0x0D, {Image::FILE_NUMBER, Image::CHANNEL + 1});
+    drive.advance(LONG_ENOUGH);
+    drive.acknowledge();
+
+    play_movie(drive, 0x48);  // XA-ADPCM with the filter
+    read_past_the_sound(drive, 3);
+
+    CHECK(drive.console->bus.cdrom.audio_ready() == 0);
+    CHECK(drive.console->bus.cdrom.played == 0);
+}
+
+TEST_CASE("the stream the filter names is the one that is played")
+{
+    const Image image(64, {9, 11});
+    const Drive drive;
+    REQUIRE(drive.console->bus.cdrom.disc.load(image.path));
+
+    drive.command(0x0D, {Image::FILE_NUMBER, Image::CHANNEL});
+    drive.advance(LONG_ENOUGH);
+    drive.acknowledge();
+
+    play_movie(drive, 0x48);
+    read_past_the_sound(drive, 3);
+
+    CHECK(drive.console->bus.cdrom.audio_ready() > 0);
+}
+
+TEST_CASE("muting the drive silences it without stopping its decoder")
+{
+    const Image image(64, woven_sound());
+    const Drive drive;
+    REQUIRE(drive.console->bus.cdrom.disc.load(image.path));
+
+    drive.command(0x0B);  // Mute
+    drive.advance(LONG_ENOUGH);
+    drive.acknowledge();
+
+    play_movie(drive, 0x40);
+    read_past_the_sound(drive, 3);
+
+    // Still decoding — the sound is there, it is simply not heard.
+    std::vector<CdRom::Audio> frames = take_sound(drive);
+    REQUIRE(frames.size() > SETTLED);
+    for (const CdRom::Audio& frame : frames) {
+        CHECK(frame.left == 0);
+        CHECK(frame.right == 0);
+    }
+
+    // And demuting picks the movie up where it has got to rather than
+    // where it was silenced.
+    drive.command(0x0C);  // Demute
+    drive.advance(LONG_ENOUGH);
+    drive.acknowledge();
+    read_past_the_sound(drive, 3);
+
+    frames = take_sound(drive);
+    REQUIRE(frames.size() > SETTLED);
+    CHECK(frames[SETTLED].left != 0);
+}
+
+TEST_CASE("the drive's own volume registers are written apart and applied "
+          "together")
+{
+    const Image image(64, woven_sound());
+    const Drive drive;
+    REQUIRE(drive.console->bus.cdrom.disc.load(image.path));
+
+    // Half of each channel into each, which is how a game asked for
+    // mono output plays a stereo movie.
+    constexpr u8 HALF = 0x40;
+    drive.set_index(2);
+    drive.write(2, HALF);  // left to left
+    drive.write(3, HALF);  // left to right
+    drive.set_index(3);
+    drive.write(1, HALF);  // right to right
+    drive.write(2, HALF);  // right to left
+
+    play_movie(drive, 0x40);
+    read_past_the_sound(drive, 3);
+
+    // Nothing has been applied yet, so the movie is still in stereo.
+    std::vector<CdRom::Audio> frames = take_sound(drive);
+    REQUIRE(frames.size() > SETTLED);
+    CHECK(frames[SETTLED].left != frames[SETTLED].right);
+
+    drive.set_index(3);
+    drive.write(3, 0x20);  // apply the four of them
+    read_past_the_sound(drive, 3);
+
+    frames = take_sound(drive);
+    REQUIRE(frames.size() > SETTLED);
+
+    const double mono =
+        (Image::LEFT_SAMPLE + Image::RIGHT_SAMPLE) * RESAMPLE_GAIN / 2;
+    for (u32 i = SETTLED; i < frames.size(); i++) {
+        CHECK(frames[i].left == frames[i].right);
+        CHECK(frames[i].left == doctest::Approx(mono).epsilon(0.01));
+    }
+}
+
+TEST_CASE("a movie that is stopped stops being heard")
+{
+    const Image image(64, {9, 11});
+    const Drive drive;
+    REQUIRE(drive.console->bus.cdrom.disc.load(image.path));
+
+    play_movie(drive, 0x40);
+    read_past_the_sound(drive, 3);
+    REQUIRE(drive.console->bus.cdrom.audio_ready() > 0);
+
+    // A third of a second of decoded sound can be in hand, and it must
+    // not go on playing after the game has stopped the drive.
+    drive.command(0x09);  // Pause
+    drive.advance(LONG_ENOUGH);
+    CHECK(drive.console->bus.cdrom.audio_ready() == 0);
 }

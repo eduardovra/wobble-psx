@@ -21,6 +21,13 @@ constexpr u32 CONTROL = 0x1F801DAA;
 constexpr u32 STATUS = 0x1F801DAE;
 constexpr u32 MAIN_VOLUME_LEFT = 0x1F801D80;
 constexpr u32 MAIN_VOLUME_RIGHT = 0x1F801D82;
+constexpr u32 CD_VOLUME_LEFT = 0x1F801DB0;
+constexpr u32 CD_VOLUME_RIGHT = 0x1F801DB2;
+
+// The drive's volume is not written the way a voice's is: there is no
+// sweep behind it, so all sixteen bits are the volume and this is as
+// loud as the drive goes.
+constexpr u16 FULL_CD_VOLUME = 0x7FFF;
 
 // Voice 0's registers, which is the voice everything here plays on.
 constexpr u32 VOICE0_VOLUME_LEFT = 0x1F801C00;
@@ -126,6 +133,18 @@ struct Sound {
     {
         console->scheduler.advance(count * Spu::TICK_CYCLES);
         console->dispatch_due_events();
+    }
+
+    // The same, with the drive's sound standing on the input. The SPU
+    // is ticked directly rather than through the clock, because what
+    // paces the machine sets this input every sample from the drive —
+    // and the drive in these tests is empty.
+    void cd_ticks(u32 count, s16 left, s16 right) const
+    {
+        for (u32 i = 0; i < count; i++) {
+            spu().set_cd_input(left, right);
+            spu().tick();
+        }
     }
 };
 
@@ -509,4 +528,72 @@ TEST_CASE("output nobody takes is dropped rather than backing up")
     std::array<Spu::Frame, 16> frames{};
     CHECK(sound.spu().take_output(frames.data(), frames.size()) == 16);
     CHECK(sound.spu().output_ready() == ready - 16);
+}
+
+TEST_CASE("the drive's sound is mixed in beside the voices")
+{
+    const Sound sound;
+    sound.write16(CONTROL, 0xC001);  // enabled, unmuted, CD audio on
+    sound.write16(MAIN_VOLUME_LEFT, FULL_VOLUME);
+    sound.write16(MAIN_VOLUME_RIGHT, FULL_VOLUME);
+    sound.write16(CD_VOLUME_LEFT, FULL_CD_VOLUME);
+    sound.write16(CD_VOLUME_RIGHT, FULL_CD_VOLUME);
+
+    // No voice is playing, so whatever comes out is the drive's.
+    sound.cd_ticks(4, 0x4000, -0x2000);
+
+    std::array<Spu::Frame, 4> frames{};
+    REQUIRE(sound.spu().take_output(frames.data(), frames.size()) == 4);
+    for (const Spu::Frame& frame : frames) {
+        CHECK(frame.left == doctest::Approx(0x4000).epsilon(0.01));
+        CHECK(frame.right == doctest::Approx(-0x2000).epsilon(0.01));
+    }
+}
+
+TEST_CASE("the drive's sound has its own volume and its own switch")
+{
+    const Sound sound;
+    sound.write16(CONTROL, 0xC001);
+    sound.write16(MAIN_VOLUME_LEFT, FULL_VOLUME);
+    sound.write16(MAIN_VOLUME_RIGHT, FULL_VOLUME);
+
+    // Half as loud on the left as on the right, which is the volume
+    // register doing the only thing it does.
+    sound.write16(CD_VOLUME_LEFT, FULL_CD_VOLUME / 2);
+    sound.write16(CD_VOLUME_RIGHT, FULL_CD_VOLUME);
+    sound.cd_ticks(1, 0x4000, 0x4000);
+
+    std::array<Spu::Frame, 1> frames{};
+    REQUIRE(sound.spu().take_output(frames.data(), frames.size()) == 1);
+    CHECK(frames[0].left == doctest::Approx(0x2000).epsilon(0.01));
+    CHECK(frames[0].right == doctest::Approx(0x4000).epsilon(0.01));
+
+    // With the bit down the drive is not heard at all, however loud
+    // its volume is.
+    sound.write16(CONTROL, 0xC000);
+    sound.cd_ticks(1, 0x4000, 0x4000);
+    REQUIRE(sound.spu().take_output(frames.data(), frames.size()) == 1);
+    CHECK(frames[0].left == 0);
+    CHECK(frames[0].right == 0);
+}
+
+TEST_CASE("a muted sound processor still plays the drive")
+{
+    // The enable and the mute are the voices'. A game that has
+    // switched its own sound off while a movie plays still hears the
+    // movie, which is what those two bits not reaching this path
+    // means.
+    const Sound sound;
+    sound.write16(CONTROL, 0x0001);  // CD audio on, everything else off
+    sound.write16(MAIN_VOLUME_LEFT, FULL_VOLUME);
+    sound.write16(MAIN_VOLUME_RIGHT, FULL_VOLUME);
+    sound.write16(CD_VOLUME_LEFT, FULL_CD_VOLUME);
+    sound.write16(CD_VOLUME_RIGHT, FULL_CD_VOLUME);
+
+    sound.cd_ticks(1, 0x4000, 0x4000);
+
+    std::array<Spu::Frame, 1> frames{};
+    REQUIRE(sound.spu().take_output(frames.data(), frames.size()) == 1);
+    CHECK(frames[0].left == doctest::Approx(0x4000).epsilon(0.01));
+    CHECK(frames[0].right == doctest::Approx(0x4000).epsilon(0.01));
 }

@@ -57,17 +57,25 @@ void Console::dispatch_due_events()
             scheduler.schedule_at(EventKind::CdRom,
                                   event->deadline + CdRom::TICK_CYCLES);
             break;
-        case EventKind::Spu:
+        case EventKind::Spu: {
             // The one sample the SPU owes the output, whether or not
             // anything is listening: a machine whose host has no sound
             // card must still take the same time to play a sound, or
             // everything a game paces against its own music drifts.
+            //
+            // The drive is asked for its sample first. That is the
+            // wire between the two chips, and taking one frame per
+            // sample is what plays a decoded sector at the speed it
+            // was recorded rather than the speed it was read.
+            const CdRom::Audio cd = bus.cdrom.take_audio();
+            bus.spu.set_cd_input(cd.left, cd.right);
             if (bus.spu.tick()) {
                 bus.irq.raise(Interrupt::Spu);
             }
             scheduler.schedule_at(EventKind::Spu,
                                   event->deadline + Spu::TICK_CYCLES);
             break;
+        }
         case EventKind::Sio:
             if (bus.sio.deliver_acknowledge()) {
                 bus.irq.raise(Interrupt::Controller);

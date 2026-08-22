@@ -43,6 +43,13 @@ struct State;
 // buffer until software asks for it by writing the request register,
 // and is then taken a byte at a time out of the data FIFO, or by the
 // DMA channel that does the same thing faster.
+//
+// Not every sector arrives that way. A movie's sound is written among
+// its pictures as compressed audio, and those sectors are the drive's
+// own business: it decodes them itself and hands the samples to the
+// sound processor, where they are mixed in beside its voices. Nothing
+// asks for them and software never sees them — which is why a game
+// starts a movie and then only ever reads its picture.
 struct CdRom {
     static constexpr u32 BASE = 0x1F801800;
     static constexpr u32 END = 0x1F801804;
@@ -173,6 +180,68 @@ struct CdRom {
     u32 data_cursor = 0;
     u32 data_end = 0;
 
+    // The sound path, which the CPU never sees: a movie's audio
+    // sectors are decoded here and handed to the SPU a sample at a
+    // time, mixed in beside its voices.
+
+    // A stereo sample of the drive's own sound, at the rate the sound
+    // processor mixes at.
+    struct Audio {
+        s16 left = 0;
+        s16 right = 0;
+    };
+
+    // Whether any of it reaches the mixer. Mute and Demute are
+    // commands; the other one is a bit beside the volume registers,
+    // and silences the compressed audio alone.
+    bool muted = false;
+    bool xa_muted = false;
+
+    // The drive's own mixer, ahead of the SPU's: how much of each
+    // channel of the disc reaches each channel of the output, in
+    // 128ths, in the order left-to-left, left-to-right, right-to-right
+    // and right-to-left. Software writes them one byte at a time and
+    // they are adopted together when it sets the apply bit, which is
+    // why there are two copies — a game fading a movie out writes four
+    // bytes and means them as one change.
+    static constexpr u32 VOLUME_COUNT = 4;
+    static constexpr u8 VOLUME_UNITY = 0x80;
+    std::array<u8, VOLUME_COUNT> volume_written = {
+        VOLUME_UNITY, 0, VOLUME_UNITY, 0};
+    std::array<u8, VOLUME_COUNT> volume = {VOLUME_UNITY, 0, VOLUME_UNITY, 0};
+
+    // The decoder's memory of the two samples before the one it is
+    // working out, one pair per channel. A block cannot be decoded
+    // without the tail of the block in front, and the tail of a sector
+    // carries into the next one — which is why this is here and not a
+    // local of the decoder.
+    std::array<s32, 2> adpcm_old{};
+    std::array<s32, 2> adpcm_older{};
+
+    // The resampler between the disc's rate and the mixer's. The drive
+    // decodes at 37800 Hz and the SPU asks at 44100, so seven samples
+    // are made out of every six by interpolating across the last
+    // twenty-nine — the zigzag filter the hardware does it with, which
+    // is a different one from the voices'.
+    static constexpr u32 RESAMPLE_RING = 32;
+    static constexpr u32 RESAMPLE_STEPS = 7;
+    static constexpr u32 SIX_STEP = 6;
+    std::array<s16, RESAMPLE_RING> resample_left{};
+    std::array<s16, RESAMPLE_RING> resample_right{};
+    u32 resample_position = 0;
+    u32 six_step = SIX_STEP;
+
+    // Decoded sound waiting to be heard. A sector is a tenth of a
+    // second of it at the slowest rate, and the mixer takes it one
+    // sample at a time, so several sectors' worth can be in hand at
+    // once — the depth is a third of a second, which is more than the
+    // drive gets ahead of itself by on a stream written to be played
+    // at the speed it is read.
+    static constexpr u32 AUDIO_CAPACITY = 16384;
+    std::array<Audio, AUDIO_CAPACITY> audio{};
+    u64 decoded = 0;
+    u64 played = 0;
+
     // Whether the lid is open. A drive standing open reaches nothing,
     // whatever is sitting in it — which is also how a disc comes to be
     // swapped, since the only moment a game may be given a different
@@ -207,6 +276,19 @@ struct CdRom {
     bool
     is_audio_sector(const std::array<u8, Disc::RAW_SECTOR_SIZE>& raw) const;
 
+    // The next frame of it, or silence when the drive has none ready.
+    // One is taken for every sample the SPU produces, and that is what
+    // paces playback: a sector decodes in an instant into a tenth of a
+    // second of sound, which is then heard over the tenth of a second
+    // it takes the mixer to ask for all of it.
+    Audio take_audio();
+
+    // Frames decoded and not yet played. Nothing on the console
+    // reports this either; it is how far ahead of the mixer the drive
+    // has got, which is the one number that says whether a movie's
+    // sound is arriving at the rate it is meant to be heard at.
+    u32 audio_ready() const;
+
     // How long one sector takes at the speed the mode register asks
     // for. The drive turns at a constant 75 sectors a second, or twice
     // that, which is the one piece of its timing that is mechanical
@@ -231,6 +313,29 @@ struct CdRom {
 
 private:
     void execute(u8 command);
+
+    // Whether a sound sector is on the stream Setfilter named, which
+    // is what decides between playing it and dropping it. Either way
+    // it is the sound hardware's and not software's.
+    bool matches_filter(const std::array<u8, Disc::RAW_SECTOR_SIZE>& raw) const;
+
+    // Turns one sector of XA-ADPCM into sound: eighteen groups of
+    // eight blocks, each a filter and a shift over twenty-eight
+    // packed samples, at whatever rate and width the subheader says.
+    void decode_audio(const std::array<u8, Disc::RAW_SECTOR_SIZE>& raw);
+
+    // One decoded frame on its way through the resampler, at the
+    // disc's own rate. A half-rate sector hands each frame over twice,
+    // which is what makes 18900 Hz into the 37800 the filter works at.
+    void resample(s16 left, s16 right);
+
+    // One frame at the mixer's rate, into the queue above.
+    void queue_audio(s16 left, s16 right);
+
+    // Throws away what has been decoded and forgets where the decoder
+    // was. What a drive that has stopped reading owes the mixer is
+    // nothing: a movie that is over must not go on being heard.
+    void stop_audio();
 
     // Moves the read on by one sector, if one is due. Split out
     // because it is the only part of the drive that runs without

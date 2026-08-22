@@ -170,6 +170,15 @@ std::string format_devices(Console& console)
     const CdRom& cdrom = console.bus.cdrom;
 
     std::string out;
+    out += std::format("cdrom  xa {}  decoded {}  muted {}  volume "
+                       "{:02X} {:02X} {:02X} {:02X}\n",
+                       cdrom.audio_ready(),
+                       cdrom.decoded,
+                       (cdrom.muted || cdrom.xa_muted) ? "yes" : "no",
+                       cdrom.volume[0],
+                       cdrom.volume[1],
+                       cdrom.volume[2],
+                       cdrom.volume[3]);
     out += std::format("cdrom  stat {:02X}  int {:X}  enable {:02X}  "
                        "queued {}  busy {}  lid {}\n",
                        cdrom.status,
@@ -192,6 +201,9 @@ std::string format_devices(Console& console)
                         timer.mode);
     }
     const Spu& spu = console.bus.spu;
+    out += std::format("spu  cd volume {:04X} {:04X}\n",
+                       spu.registers[(0x1F801DB0 - Spu::BASE) / 2],
+                       spu.registers[(0x1F801DB2 - Spu::BASE) / 2]);
     out += std::format("spu  ctrl {:04X}  endx {:06X}  playing {}  "
                        "samples {}\n",
                        spu.control(),

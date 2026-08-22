@@ -26,10 +26,16 @@ struct State;
 // one, and a machine whose output nobody drains sounds the same to the
 // software running on it.
 //
+// The voices are not the only thing summed there. The CD-ROM drive
+// decodes the compressed audio written between a movie's pictures and
+// hands it over one sample at a time, to be mixed in beside them under
+// a volume of its own and a bit in the control register that switches
+// it off. That path is the drive's, not a voice's: neither the SPU's
+// enable nor its mute reaches it.
+//
 // What is missing is the wet path and the corners: reverb, the noise
-// generator, pitch modulation, the volume sweeps, and the CD audio the
-// mixer would fold in beside the voices. Each is noted where it would
-// have gone.
+// generator, pitch modulation, and the volume sweeps. Each is noted
+// where it would have gone.
 struct Spu {
     static constexpr u32 BASE = 0x1F801C00;
     static constexpr u32 END = 0x1F802000;
@@ -123,6 +129,12 @@ struct Spu {
     void write_dma(u32 word);
     u32 read_dma();
 
+    // The drive's sound for the sample about to be produced. Set once
+    // per tick by whoever is pacing the machine, because the SPU has
+    // no way to ask the drive for it: the two are wired together and
+    // the sample is simply there on the input when the mixer looks.
+    void set_cd_input(s16 left, s16 right);
+
     // Produces one stereo sample: every voice decoded, enveloped and
     // summed. Returns whether a voice has just read the address
     // software armed, which is the only interrupt the SPU raises on
@@ -170,6 +182,13 @@ struct Spu {
     // armed, and cleared by writing the control register with the
     // enable off.
     bool irq_flag = false;
+
+    // The drive's sound, as it stands on the input. Not a queue: the
+    // drive holds what it has decoded and the mixer takes one frame of
+    // it per sample, so what is here is only ever the frame being
+    // mixed.
+    s16 cd_left = 0;
+    s16 cd_right = 0;
 
 private:
     // The register at `phys`, as an index into the file.

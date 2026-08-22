@@ -33,10 +33,13 @@ constexpr u32 TRANSFER_ADDRESS = 0x1F801DA6;
 constexpr u32 TRANSFER_FIFO = 0x1F801DA8;
 constexpr u32 CONTROL = 0x1F801DAA;
 constexpr u32 STATUS = 0x1F801DAE;
+constexpr u32 CD_VOLUME_LEFT = 0x1F801DB0;
+constexpr u32 CD_VOLUME_RIGHT = 0x1F801DB2;
 
 // Bits of the control register. The transfer mode is the pair that
 // matters most here: it is what the status register has to echo back
 // before the sound library will go on.
+constexpr u16 CONTROL_CD_AUDIO = 0x0001;
 constexpr u16 CONTROL_TRANSFER_MODE = 0x0030;
 constexpr u16 CONTROL_IRQ_ENABLE = 0x0040;
 constexpr u16 CONTROL_UNMUTE = 0x4000;
@@ -175,6 +178,8 @@ void Spu::reset()
     key_off = 0;
     ended = 0;
     irq_flag = false;
+    cd_left = 0;
+    cd_right = 0;
     output = {};
     produced = 0;
     taken = 0;
@@ -190,6 +195,8 @@ void Spu::visit_state(State& state)
     state(key_off);
     state(ended);
     state(irq_flag);
+    state(cd_left);
+    state(cd_right);
 }
 
 u16 Spu::voice_register(u32 voice, u32 offset) const
@@ -538,6 +545,12 @@ u32 Spu::take_output(Frame* frames, u32 count)
 
 u32 Spu::output_ready() const { return static_cast<u32>(produced - taken); }
 
+void Spu::set_cd_input(s16 left, s16 right)
+{
+    cd_left = left;
+    cd_right = right;
+}
+
 bool Spu::tick()
 {
     const bool was_pending = irq_flag;
@@ -570,12 +583,29 @@ bool Spu::tick()
             (shaped * volume_of(voice_register(i, VOICE_VOLUME_RIGHT))) >> 15;
     }
 
-    // Reverb would be mixed in here, and the CD's own audio beside it.
-    // Neither exists, so what the voices made is the whole output.
+    // Reverb would be mixed in here. It does not exist, so what the
+    // voices made is all there is of the SPU's own output.
     const u16 mode = control();
     if ((mode & CONTROL_ENABLE) == 0 || (mode & CONTROL_UNMUTE) == 0) {
         left = 0;
         right = 0;
+    }
+
+    // The drive's sound joins after that, because neither the enable
+    // nor the mute is its: they switch off the voices, and a console
+    // playing a CD through a game that has switched its own sound
+    // processor off still plays the CD. Its own bit and its own volume
+    // are what stop it.
+    if ((mode & CONTROL_CD_AUDIO) != 0) {
+        // These two are not written the way the voices' volumes are:
+        // there is no sweep behind them, so all sixteen bits are the
+        // volume and unity is the top of them rather than half of it.
+        const s32 cd_volume_left =
+            static_cast<s16>(registers[index_of(CD_VOLUME_LEFT)]);
+        const s32 cd_volume_right =
+            static_cast<s16>(registers[index_of(CD_VOLUME_RIGHT)]);
+        left += (cd_left * cd_volume_left) >> 15;
+        right += (cd_right * cd_volume_right) >> 15;
     }
 
     // The sum of the voices is a sixteen-bit signal before the main
