@@ -400,6 +400,9 @@ void CdRom::visit_state(State& state)
     state(audio);
     state(decoded);
     state(played);
+    state(playing);
+    state(dry);
+    state(last_frame);
 }
 
 u64 CdRom::cycles_per_sector() const
@@ -478,6 +481,16 @@ void CdRom::advance_read(u64 cycles)
         return;
     }
 
+    // How far past the sector this tick landed. The drive is ticked on
+    // a coarser grain than a sector takes, so dropping the overshoot
+    // and starting the next sector from a whole one rounds every
+    // sector up to the next tick — a drive that turns slower than 75
+    // sectors a second. Nothing much minds that except a movie, whose
+    // sound is written at exactly the rate the sound hardware takes it
+    // away: read it slow and the queue runs dry once a sector, and
+    // silence is spliced into the sound where it was empty.
+    const u64 overshoot = cycles - sector_remaining;
+
     // The queue is two deep, and a read that has got ahead of software
     // must not overwrite the sector it has not collected yet. So the
     // drive waits with the sector under its head rather than dropping
@@ -510,6 +523,7 @@ void CdRom::advance_read(u64 cycles)
 
     read_lba++;
     sector_remaining = cycles_per_sector();
+    sector_remaining -= std::min(overshoot, sector_remaining);
 
     // A movie's sound is written between its pictures, in the same run
     // of sectors, and goes straight to the sound hardware: no
@@ -639,12 +653,27 @@ void CdRom::queue_audio(s16 left, s16 right)
 
 CdRom::Audio CdRom::take_audio()
 {
-    if (played >= decoded) {
-        return {};
+    if (!playing) {
+        if (decoded - played < AUDIO_PRIME) {
+            return {};
+        }
+        playing = true;
     }
 
-    const Audio frame = audio[played % AUDIO_CAPACITY];
-    played++;
+    if (played < decoded) {
+        last_frame = audio[played % AUDIO_CAPACITY];
+        played++;
+        dry = 0;
+    } else {
+        dry++;
+        if (dry > AUDIO_HOLD) {
+            playing = false;
+            last_frame = {};
+            return {};
+        }
+    }
+
+    const Audio frame = last_frame;
 
     // Muting silences the output rather than stopping the decoder, so
     // a movie muted halfway through comes back where it has got to and
@@ -676,6 +705,9 @@ void CdRom::stop_audio()
     resample_right = {};
     resample_position = 0;
     six_step = SIX_STEP;
+    playing = false;
+    dry = 0;
+    last_frame = {};
 }
 
 void CdRom::load_header()

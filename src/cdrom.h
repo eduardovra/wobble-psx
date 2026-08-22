@@ -242,6 +242,27 @@ struct CdRom {
     u64 decoded = 0;
     u64 played = 0;
 
+    // A sector arrives all at once and is taken one sample at a time,
+    // so the queue fills in a step and drains in a line. Starting to
+    // play the moment the first sample lands leaves it hovering at
+    // empty, where a sector arriving a little late is a hole of
+    // silence in the middle of the sound. So two sectors' worth is
+    // gathered before any of it is played.
+    static constexpr u32 AUDIO_SECTOR_SAMPLES = 2352;
+    static constexpr u32 AUDIO_PRIME = 2 * AUDIO_SECTOR_SAMPLES;
+
+    // And when the drive is behind anyway, the last sample stands in
+    // for the one that has not arrived. A hole of silence is a step
+    // to zero and back, which is heard as a click — the louder the
+    // sound the louder the click — where a sample held for a moment is
+    // not heard at all. Held for longer than this the stream has
+    // really ended rather than fallen behind, and the drive goes
+    // quiet.
+    static constexpr u32 AUDIO_HOLD = 64;
+    bool playing = false;
+    u32 dry = 0;
+    Audio last_frame = {};
+
     // Whether the lid is open. A drive standing open reaches nothing,
     // whatever is sitting in it — which is also how a disc comes to be
     // swapped, since the only moment a game may be given a different
